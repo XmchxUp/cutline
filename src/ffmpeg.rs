@@ -201,8 +201,9 @@ pub fn shell_quote(arg: &str) -> String {
 }
 
 pub fn temp_clip_path(cache_path: &Utf8Path) -> Utf8PathBuf {
-    let file_name = cache_path.file_name().unwrap_or("clip.mp4");
-    cache_path.with_file_name(format!("{file_name}.tmp"))
+    let stem = cache_path.file_stem().unwrap_or("clip");
+    let extension = cache_path.extension().unwrap_or("mp4");
+    cache_path.with_file_name(format!("{stem}.tmp.{extension}"))
 }
 
 #[cfg(test)]
