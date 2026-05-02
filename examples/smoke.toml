@@ -1,0 +1,11 @@
+[output]
+path = "target/cutline-smoke/output.mp4"
+
+[input.main]
+path = "../Cargo.toml"
+
+[[clip]]
+input = "main"
+start = "0s"
+end = "1s"
+chapter = "Smoke"

@@ -156,7 +156,9 @@ cutline clean project.toml
 with `ffprobe`; `--no-probe` skips media probing.
 
 `plan` prints the derived timeline, cache keys, chapter times, and ffmpeg
-commands. It defaults to human-readable text and supports `--json`.
+commands. It defaults to human-readable text and supports `--json`. It also
+accepts `--no-probe` for plan inspection on machines or fixtures without real
+media files.
 
 `render` renders missing cache clips and then concatenates them. It refuses to
 overwrite an existing final output unless `--force` is passed.

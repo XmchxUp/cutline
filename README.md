@@ -7,7 +7,7 @@ a linear clip sequence into cached ffmpeg renders plus a final concat output.
 
 ## Status
 
-This repository is an initial scaffold. The first implementation target is:
+Cutline currently implements the first usable V1 loop:
 
 - TOML project files
 - linear single-track clip sequences
@@ -15,6 +15,8 @@ This repository is an initial scaffold. The first implementation target is:
 - millisecond timestamp precision
 - clip cache under the project-local `.cutline/` directory
 - `check`, `plan`, `render`, and `clean` CLI commands
+
+`render` requires `ffmpeg`; media probing requires `ffprobe`.
 
 ## Example
 
@@ -70,11 +72,14 @@ current working directory.
 $ cutline check project.toml
 $ cutline check project.toml --no-probe
 $ cutline plan project.toml
+$ cutline plan project.toml --no-probe
 $ cutline plan project.toml --json
 $ cutline render project.toml
 $ cutline render project.toml --force
 $ cutline clean project.toml
 ```
+
+`render` refuses to overwrite an existing output unless `--force` is passed.
 
 ## Design
 

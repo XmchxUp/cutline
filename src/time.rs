@@ -42,6 +42,10 @@ impl TimeValue {
 
         format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
     }
+
+    pub fn as_ffmpeg_seconds(self) -> String {
+        format!("{}.{:03}", self.millis / 1000, self.millis % 1000)
+    }
 }
 
 impl Serialize for TimeValue {
@@ -100,6 +104,10 @@ fn parse_colon_time(input: &str) -> Result<u64> {
         _ => return Err(CutlineError::InvalidTime(input.to_owned())),
     };
 
+    if minutes >= 60 || seconds >= 60_000 {
+        return Err(CutlineError::InvalidTime(input.to_owned()));
+    }
+
     Ok(hours * 60 * 60 * 1000 + minutes * 60 * 1000 + seconds)
 }
 
@@ -144,5 +152,19 @@ mod tests {
     #[test]
     fn displays_canonical_time() {
         assert_eq!(TimeValue::from_millis(4_354_567).display(), "01:12:34.567");
+    }
+
+    #[test]
+    fn formats_ffmpeg_seconds() {
+        assert_eq!(
+            TimeValue::from_millis(4_354_567).as_ffmpeg_seconds(),
+            "4354.567"
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_colon_parts() {
+        assert!(TimeValue::parse("01:60:00").is_err());
+        assert!(TimeValue::parse("01:00:60").is_err());
     }
 }

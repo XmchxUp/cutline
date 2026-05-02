@@ -3,5 +3,17 @@ use camino::Utf8PathBuf;
 use crate::model::NormalizedProject;
 
 pub fn cache_dir(project: &NormalizedProject) -> Utf8PathBuf {
-    project.project_dir.join(".cutline").join("cache")
+    work_dir(project).join("cache")
+}
+
+pub fn work_dir(project: &NormalizedProject) -> Utf8PathBuf {
+    project.project_dir.join(".cutline")
+}
+
+pub fn concat_list_path(project: &NormalizedProject) -> Utf8PathBuf {
+    work_dir(project).join("concat.txt")
+}
+
+pub fn plan_json_path(project: &NormalizedProject) -> Utf8PathBuf {
+    work_dir(project).join("plan.json")
 }

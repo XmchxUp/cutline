@@ -27,6 +27,10 @@ pub enum Command {
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+
+        /// Skip ffprobe media duration checks.
+        #[arg(long)]
+        no_probe: bool,
     },
 
     /// Render clip cache files and concatenate the final output.

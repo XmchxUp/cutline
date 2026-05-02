@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::time::TimeValue;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     pub output: OutputConfig,
 
@@ -20,11 +21,13 @@ pub struct ProjectConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     pub path: Utf8PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct InputConfig {
     pub path: Utf8PathBuf,
 
@@ -33,6 +36,7 @@ pub struct InputConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClipConfig {
     pub input: String,
     pub start: TimeValue,
@@ -49,6 +53,7 @@ pub struct ClipConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenderConfig {
     #[serde(default = "default_video_codec")]
     pub video_codec: String,
@@ -95,6 +100,7 @@ impl Default for RenderConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenderExtraConfig {
     #[serde(default)]
     pub input_args: Vec<String>,
@@ -125,4 +131,33 @@ fn default_pixel_format() -> String {
 
 fn default_container() -> String {
     "mp4".to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProjectConfig;
+
+    #[test]
+    fn parses_smoke_example() {
+        let config: ProjectConfig = toml::from_str(include_str!("../examples/smoke.toml")).unwrap();
+
+        assert_eq!(config.input.len(), 1);
+        assert_eq!(config.clips.len(), 1);
+        assert_eq!(config.render.video_codec, "libx264");
+    }
+
+    #[test]
+    fn rejects_unknown_fields() {
+        let err = toml::from_str::<ProjectConfig>(
+            r#"
+            [output]
+            path = "out.mp4"
+            surprise = true
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("unknown field"));
+    }
 }
