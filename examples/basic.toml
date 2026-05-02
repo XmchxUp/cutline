@@ -1,0 +1,40 @@
+[output]
+path = "dist/output.mp4"
+
+[input.main]
+path = "raw/vod.mp4"
+
+[input.brb]
+path = "raw/brb.mp4"
+
+[render]
+video_codec = "libx264"
+audio_codec = "aac"
+video_bitrate = "4000k"
+audio_bitrate = "300k"
+preset = "veryfast"
+crf = 23
+
+[render.extra]
+input_args = ["-hwaccel", "auto"]
+output_args = ["-movflags", "+faststart"]
+
+[[clip]]
+input = "main"
+start = "00:10:00"
+end = "00:15:00"
+chapter = "Opening"
+
+[[clip]]
+input = "brb"
+start = "0s"
+end = "15s"
+mute = true
+chapter = "Break"
+
+[[clip]]
+input = "main"
+start = "01:20:00.000"
+end = "01:28:30.500"
+blur = true
+chapter = "Main topic"
