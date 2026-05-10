@@ -25,4 +25,7 @@ pub enum CutlineError {
 
     #[error(transparent)]
     Toml(#[from] toml::de::Error),
+
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }

@@ -98,19 +98,43 @@ fn main() -> anyhow::Result<()> {
             println!("AutoCut command not yet implemented");
         }
         Command::Story {
-            project: _,
-            json: _,
+            project,
+            json,
             voice_list,
         } => {
-            if voice_list {
-                println!("Voice list not yet implemented");
-            } else {
-                println!("Story command not yet implemented");
-            }
+            let output = run_story_command(&project, json, voice_list)?;
+            print!("{output}");
         }
     }
 
     Ok(())
+}
+
+fn run_story_command(project: &Utf8Path, json: bool, voice_list: bool) -> anyhow::Result<String> {
+    if voice_list {
+        return Ok("Voice list not yet implemented\n".to_owned());
+    }
+
+    let project = load_project(
+        project,
+        ValidationOptions {
+            require_inputs: true,
+            probe_media: false,
+        },
+    )?;
+    let summary = cutline::story::generate_reviewable_draft_package(&project)?;
+
+    if json {
+        Ok(format!(
+            "{}\n",
+            serde_json::json!({
+                "draft_id": summary.draft_id,
+                "package_path": summary.package_path,
+            })
+        ))
+    } else {
+        Ok(format!("created draft package: {}\n", summary.package_path))
+    }
 }
 
 fn load_project(
@@ -224,4 +248,56 @@ fn canonicalize_utf8(path: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
     let canonical = fs::canonicalize(path).with_context(|| format!("failed to access {path}"))?;
     Utf8PathBuf::from_path_buf(canonical)
         .map_err(|path| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use camino::Utf8PathBuf;
+
+    use super::run_story_command;
+
+    #[test]
+    fn story_command_json_outputs_draft_summary() {
+        let root =
+            std::env::temp_dir().join(format!("cutline-story-command-json-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("stories")).unwrap();
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::write(root.join("stories/demo.txt"), "第一行\n第二行\n").unwrap();
+        fs::write(root.join("assets/bg.mp4"), "not real media").unwrap();
+        fs::write(
+            root.join("project.toml"),
+            r#"
+            [output]
+            path = "dist/story.mp4"
+
+            [[story]]
+            name = "demo"
+            source = "stories/demo.txt"
+            start_line = 1
+            end_line = 2
+            engagement_angle = "reversal"
+            background = "assets/bg.mp4"
+            platform = "douyin"
+            "#,
+        )
+        .unwrap();
+
+        let project_path = Utf8PathBuf::from_path_buf(root.join("project.toml")).unwrap();
+        let output = run_story_command(&project_path, true, false).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(json["draft_id"], "demo");
+        assert!(
+            json["package_path"]
+                .as_str()
+                .unwrap()
+                .ends_with(".cutline/drafts/demo")
+        );
+        assert!(root.join(".cutline/drafts/demo/draft.json").is_file());
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
