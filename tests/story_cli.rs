@@ -51,6 +51,8 @@ fn story_command_json_outputs_draft_summary() {
     );
     assert!(root.join(".cutline/drafts/demo/draft.json").is_file());
     assert!(root.join(".cutline/drafts/demo/references.json").is_file());
+    assert!(root.join(".cutline/drafts/demo/narration.txt").is_file());
+    assert!(root.join(".cutline/drafts/demo/subtitles.srt").is_file());
     assert!(root.join(".cutline/drafts/demo/assets").is_dir());
 
     let manifest: serde_json::Value = serde_json::from_str(
@@ -62,6 +64,15 @@ fn story_command_json_outputs_draft_summary() {
         manifest["short_video_drafts"][0]["hook"]["source_reference"]["source"],
         "stories/demo.txt"
     );
+    assert_eq!(
+        manifest["generated_assets"]["narration"]["path"],
+        "narration.txt"
+    );
+    assert_eq!(
+        manifest["generated_assets"]["subtitles"]["path"],
+        "subtitles.srt"
+    );
+    assert_eq!(manifest["subtitle_style"]["platform"], "douyin");
 
     let references: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(root.join(".cutline/drafts/demo/references.json")).unwrap(),
@@ -73,6 +84,14 @@ fn story_command_json_outputs_draft_summary() {
             .unwrap()
             .iter()
             .any(|step| step["step"] == "script" && step["provider"] == "local_script_provider")
+    );
+    assert!(
+        references["pipeline_step_runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["step"] == "subtitle"
+                && step["provider"] == "local_subtitle_provider")
     );
 
     let _ = fs::remove_dir_all(&root);

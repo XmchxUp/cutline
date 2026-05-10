@@ -9,6 +9,10 @@ use crate::error::{CutlineError, Result};
 use crate::model::{NormalizedProject, StoryVideo};
 
 pub const DRAFT_SCHEMA_VERSION: &str = "cutline-draft-v1";
+const NARRATION_FILE: &str = "narration.txt";
+const SUBTITLES_FILE: &str = "subtitles.srt";
+const SUBTITLE_MAX_CHARS_PER_LINE: usize = 18;
+const SUBTITLE_CUE_DURATION_MILLIS: u64 = 2_000;
 
 #[derive(Debug, Clone)]
 pub struct DraftPackageSummary {
@@ -25,6 +29,8 @@ pub struct DraftManifest {
     pub story: ManifestStory,
     pub visual: ManifestVisual,
     pub output: ManifestOutput,
+    pub generated_assets: GeneratedAssets,
+    pub subtitle_style: SubtitleStyle,
     pub short_video_drafts: Vec<ShortVideoDraft>,
 }
 
@@ -56,6 +62,21 @@ pub struct ManifestAssetReference {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestOutput {
     pub path: Utf8PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneratedAssets {
+    pub narration: ManifestAssetReference,
+    pub subtitles: ManifestAssetReference,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtitleStyle {
+    pub platform: String,
+    pub aspect_ratio: String,
+    pub max_chars_per_line: usize,
+    pub position: String,
+    pub safe_area_bottom_percent: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +155,12 @@ pub fn generate_reviewable_draft_package(
         .join(&story.name);
     fs::create_dir_all(package_path.join("assets"))?;
     let short_video_drafts = vec![generate_local_script_draft(&project.project_dir, story)?];
+    let narration_text = format!("{}\n", short_video_drafts[0].adapted_narration.text);
+    let subtitles = generate_subtitles(&short_video_drafts[0].adapted_narration.text);
+    let subtitles_text = format_srt(&subtitles);
+    fs::write(package_path.join(NARRATION_FILE), &narration_text)?;
+    fs::write(package_path.join(SUBTITLES_FILE), &subtitles_text)?;
+
     let manifest = DraftManifest {
         schema_version: DRAFT_SCHEMA_VERSION.to_owned(),
         workflow: "StoryHighlightVideo".to_owned(),
@@ -157,6 +184,17 @@ pub fn generate_reviewable_draft_package(
         output: ManifestOutput {
             path: project_reference_path(&project.project_dir, &project.output_path),
         },
+        generated_assets: GeneratedAssets {
+            narration: ManifestAssetReference {
+                path: Utf8PathBuf::from(NARRATION_FILE),
+                fingerprint: bytes_fingerprint(narration_text.as_bytes()),
+            },
+            subtitles: ManifestAssetReference {
+                path: Utf8PathBuf::from(SUBTITLES_FILE),
+                fingerprint: bytes_fingerprint(subtitles_text.as_bytes()),
+            },
+        },
+        subtitle_style: default_subtitle_style(&story.platform),
         short_video_drafts: short_video_drafts.clone(),
     };
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -167,7 +205,7 @@ pub fn generate_reviewable_draft_package(
     let reference_map = ReferenceMap {
         schema_version: DRAFT_SCHEMA_VERSION.to_owned(),
         draft_id: story.name.clone(),
-        references: script_reference_entries(&short_video_drafts[0]),
+        references: generated_reference_entries(&short_video_drafts[0], &subtitles),
         pipeline_step_runs: vec![
             PipelineStepRun {
                 step: "ingest".to_owned(),
@@ -187,6 +225,17 @@ pub fn generate_reviewable_draft_package(
                     "end_line": story.end_line,
                 }),
                 outputs: vec!["short_video_drafts[0]".to_owned()],
+            },
+            PipelineStepRun {
+                step: "subtitle".to_owned(),
+                status: "completed".to_owned(),
+                provider: "local_subtitle_provider".to_owned(),
+                parameters: serde_json::json!({
+                    "max_chars_per_line": SUBTITLE_MAX_CHARS_PER_LINE,
+                    "cue_duration_millis": SUBTITLE_CUE_DURATION_MILLIS,
+                    "subtitle_style": "douyin_default",
+                }),
+                outputs: vec![NARRATION_FILE.to_owned(), SUBTITLES_FILE.to_owned()],
             },
             PipelineStepRun {
                 step: "draft_package".to_owned(),
@@ -209,7 +258,10 @@ pub fn generate_reviewable_draft_package(
     })
 }
 
-fn script_reference_entries(draft: &ShortVideoDraft) -> Vec<ReferenceEntry> {
+fn generated_reference_entries(
+    draft: &ShortVideoDraft,
+    subtitles: &[SubtitleCue],
+) -> Vec<ReferenceEntry> {
     let mut entries = Vec::new();
     entries.push(reference_entry(format!("{}.hook", draft.id), &draft.hook));
     for (index, beat) in draft.content_beats.iter().enumerate() {
@@ -222,6 +274,16 @@ fn script_reference_entries(draft: &ShortVideoDraft) -> Vec<ReferenceEntry> {
         format!("{}.adapted_narration", draft.id),
         &draft.adapted_narration,
     ));
+    entries.push(reference_entry(
+        format!("{NARRATION_FILE}:1"),
+        &draft.adapted_narration,
+    ));
+    entries.extend(subtitles.iter().map(|cue| {
+        reference_entry(
+            format!("{SUBTITLES_FILE}:{}", cue.index),
+            &draft.adapted_narration,
+        )
+    }));
     entries.push(reference_entry(
         format!("{}.ending", draft.id),
         &draft.ending,
@@ -303,6 +365,77 @@ fn generate_local_script_draft(
     })
 }
 
+#[derive(Debug, Clone)]
+struct SubtitleCue {
+    index: usize,
+    start_millis: u64,
+    end_millis: u64,
+    text: String,
+}
+
+fn generate_subtitles(narration: &str) -> Vec<SubtitleCue> {
+    split_subtitle_text(narration, SUBTITLE_MAX_CHARS_PER_LINE)
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let start_millis = (index as u64) * SUBTITLE_CUE_DURATION_MILLIS;
+            SubtitleCue {
+                index: index + 1,
+                start_millis,
+                end_millis: start_millis + SUBTITLE_CUE_DURATION_MILLIS,
+                text,
+            }
+        })
+        .collect()
+}
+
+fn split_subtitle_text(text: &str, max_chars: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for character in text.chars().filter(|character| !character.is_whitespace()) {
+        current.push(character);
+        if current.chars().count() >= max_chars || "，。！？；：".contains(character) {
+            lines.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn format_srt(cues: &[SubtitleCue]) -> String {
+    let mut output = String::new();
+    for cue in cues {
+        output.push_str(&format!(
+            "{}\n{} --> {}\n{}\n\n",
+            cue.index,
+            format_srt_timestamp(cue.start_millis),
+            format_srt_timestamp(cue.end_millis),
+            cue.text
+        ));
+    }
+    output
+}
+
+fn format_srt_timestamp(millis: u64) -> String {
+    let hours = millis / 3_600_000;
+    let minutes = (millis % 3_600_000) / 60_000;
+    let seconds = (millis % 60_000) / 1_000;
+    let millis = millis % 1_000;
+    format!("{hours:02}:{minutes:02}:{seconds:02},{millis:03}")
+}
+
+fn default_subtitle_style(platform: &str) -> SubtitleStyle {
+    SubtitleStyle {
+        platform: platform.to_owned(),
+        aspect_ratio: "9:16".to_owned(),
+        max_chars_per_line: SUBTITLE_MAX_CHARS_PER_LINE,
+        position: "bottom_safe_area".to_owned(),
+        safe_area_bottom_percent: 12,
+    }
+}
+
 fn project_reference_path(project_dir: &camino::Utf8Path, path: &camino::Utf8Path) -> Utf8PathBuf {
     path.strip_prefix(project_dir)
         .map(camino::Utf8Path::to_path_buf)
@@ -311,9 +444,13 @@ fn project_reference_path(project_dir: &camino::Utf8Path, path: &camino::Utf8Pat
 
 fn file_fingerprint(path: &camino::Utf8Path) -> Result<String> {
     let bytes = fs::read(path)?;
+    Ok(bytes_fingerprint(&bytes))
+}
+
+fn bytes_fingerprint(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 /// Parse a text file into segments based on line numbers.
@@ -423,6 +560,15 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    fn parse_srt_test_timestamp(timestamp: &str) -> u64 {
+        let (clock, millis) = timestamp.split_once(',').unwrap();
+        let mut parts = clock.split(':').map(|part| part.parse::<u64>().unwrap());
+        let hours = parts.next().unwrap();
+        let minutes = parts.next().unwrap();
+        let seconds = parts.next().unwrap();
+        hours * 3_600_000 + minutes * 60_000 + seconds * 1_000 + millis.parse::<u64>().unwrap()
     }
 
     #[test]
@@ -556,6 +702,107 @@ mod tests {
     }
 
     #[test]
+    fn draft_package_writes_narration_text_from_adapted_narration() {
+        let fixture = DraftFixture::new("narration-text");
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("draft.json")).unwrap(),
+        )
+        .unwrap();
+        let narration = fs::read_to_string(summary.package_path.join("narration.txt")).unwrap();
+
+        assert_eq!(
+            narration.trim_end(),
+            manifest["short_video_drafts"][0]["adapted_narration"]["text"]
+                .as_str()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn draft_package_writes_readable_srt_subtitles() {
+        let fixture = DraftFixture::with_source(
+            "readable-srt",
+            "第一行出现了很长很长的冲突信息需要拆短\n第二行继续推动悬念\n第三行给出新的反转\n",
+        );
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let srt = fs::read_to_string(summary.package_path.join("subtitles.srt")).unwrap();
+        let blocks = srt.trim_end().split("\n\n").collect::<Vec<_>>();
+
+        assert!(!blocks.is_empty());
+        let first_block = blocks[0].lines().collect::<Vec<_>>();
+        assert_eq!(first_block[0], "1");
+        assert!(first_block[1].contains(" --> "));
+        assert!(
+            blocks
+                .iter()
+                .flat_map(|block| block.lines().skip(2))
+                .all(|line| line.chars().count() <= 18)
+        );
+    }
+
+    #[test]
+    fn draft_package_writes_srt_with_monotonic_timings() {
+        let fixture = DraftFixture::new("monotonic-srt");
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let srt = fs::read_to_string(summary.package_path.join("subtitles.srt")).unwrap();
+        let ranges = srt
+            .trim_end()
+            .split("\n\n")
+            .map(|block| {
+                let timing = block.lines().nth(1).unwrap();
+                let (start, end) = timing.split_once(" --> ").unwrap();
+                (
+                    parse_srt_test_timestamp(start),
+                    parse_srt_test_timestamp(end),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(ranges.iter().all(|(start, end)| start < end));
+        assert!(ranges.windows(2).all(|pair| pair[0].1 <= pair[1].0));
+    }
+
+    #[test]
+    fn draft_manifest_records_generated_assets_and_subtitle_style() {
+        let fixture = DraftFixture::new("subtitle-manifest");
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("draft.json")).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            manifest["generated_assets"]["narration"]["path"],
+            "narration.txt"
+        );
+        assert_eq!(
+            manifest["generated_assets"]["subtitles"]["path"],
+            "subtitles.srt"
+        );
+        assert!(
+            manifest["generated_assets"]["narration"]["fingerprint"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert!(
+            manifest["generated_assets"]["subtitles"]["fingerprint"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert_eq!(manifest["subtitle_style"]["platform"], "douyin");
+        assert_eq!(manifest["subtitle_style"]["aspect_ratio"], "9:16");
+        assert_eq!(manifest["subtitle_style"]["max_chars_per_line"], 18);
+        assert_eq!(manifest["subtitle_style"]["position"], "bottom_safe_area");
+    }
+
+    #[test]
     fn local_script_draft_keeps_three_to_five_beats_for_short_source_ranges() {
         let fixture = DraftFixture::with_source("short-script-range", "第一行\n第二行\n");
 
@@ -633,6 +880,28 @@ mod tests {
     }
 
     #[test]
+    fn reference_map_records_narration_and_subtitle_source_references() {
+        let fixture = DraftFixture::new("subtitle-reference-map");
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let reference_map: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("references.json")).unwrap(),
+        )
+        .unwrap();
+        let references = reference_map["references"].as_array().unwrap();
+
+        for target in ["narration.txt:1", "subtitles.srt:1"] {
+            let reference = references
+                .iter()
+                .find(|reference| reference["target"] == target)
+                .expect("generated text reference");
+            assert_eq!(reference["source"], "stories/demo.txt");
+            assert_eq!(reference["start_line"], 1);
+            assert_eq!(reference["end_line"], 3);
+        }
+    }
+
+    #[test]
     fn reference_map_records_local_script_step_run() {
         let fixture = DraftFixture::new("script-step-run");
 
@@ -652,5 +921,28 @@ mod tests {
         assert_eq!(script_step["parameters"]["engagement_angle"], "reversal");
         assert_eq!(script_step["parameters"]["source"], "stories/demo.txt");
         assert_eq!(script_step["outputs"][0], "short_video_drafts[0]");
+    }
+
+    #[test]
+    fn reference_map_records_subtitle_step_run() {
+        let fixture = DraftFixture::new("subtitle-step-run");
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let reference_map: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("references.json")).unwrap(),
+        )
+        .unwrap();
+        let steps = reference_map["pipeline_step_runs"].as_array().unwrap();
+        let subtitle_step = steps
+            .iter()
+            .find(|step| step["step"] == "subtitle")
+            .expect("subtitle step run");
+
+        assert_eq!(subtitle_step["status"], "completed");
+        assert_eq!(subtitle_step["provider"], "local_subtitle_provider");
+        assert_eq!(subtitle_step["parameters"]["max_chars_per_line"], 18);
+        assert_eq!(subtitle_step["parameters"]["cue_duration_millis"], 2000);
+        assert_eq!(subtitle_step["outputs"][0], "narration.txt");
+        assert_eq!(subtitle_step["outputs"][1], "subtitles.srt");
     }
 }
