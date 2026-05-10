@@ -73,5 +73,9 @@ pub enum Command {
         /// List available TTS voices.
         #[arg(long)]
         voice_list: bool,
+
+        /// Render a local 9:16 preview video into the draft package.
+        #[arg(long)]
+        render_preview: bool,
     },
 }

@@ -101,8 +101,9 @@ fn main() -> anyhow::Result<()> {
             project,
             json,
             voice_list,
+            render_preview,
         } => {
-            let output = run_story_command(&project, json, voice_list)?;
+            let output = run_story_command(&project, json, voice_list, render_preview)?;
             print!("{output}");
         }
     }
@@ -110,7 +111,12 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_story_command(project: &Utf8Path, json: bool, voice_list: bool) -> anyhow::Result<String> {
+fn run_story_command(
+    project: &Utf8Path,
+    json: bool,
+    voice_list: bool,
+    render_preview: bool,
+) -> anyhow::Result<String> {
     if voice_list {
         return Ok("Voice list not yet implemented\n".to_owned());
     }
@@ -122,7 +128,13 @@ fn run_story_command(project: &Utf8Path, json: bool, voice_list: bool) -> anyhow
             probe_media: false,
         },
     )?;
-    let summary = cutline::story::generate_reviewable_draft_package(&project)?;
+    let summary = cutline::story::generate_reviewable_draft_package_with_options(
+        &project,
+        cutline::story::DraftPackageOptions {
+            render_preview,
+            ffmpeg_program: "ffmpeg".to_owned(),
+        },
+    )?;
 
     if json {
         Ok(format!(
@@ -286,7 +298,7 @@ mod tests {
         .unwrap();
 
         let project_path = Utf8PathBuf::from_path_buf(root.join("project.toml")).unwrap();
-        let output = run_story_command(&project_path, true, false).unwrap();
+        let output = run_story_command(&project_path, true, false, false).unwrap();
         let json: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         assert_eq!(json["draft_id"], "demo");

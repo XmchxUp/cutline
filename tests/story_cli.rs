@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 use camino::Utf8PathBuf;
@@ -11,6 +12,17 @@ fn story_command_json_outputs_draft_summary() {
     fs::create_dir_all(root.join("assets")).unwrap();
     fs::write(root.join("stories/demo.txt"), "第一行\n第二行\n").unwrap();
     fs::write(root.join("assets/bg.mp4"), "not real media").unwrap();
+    let fake_bin = root.join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_ffmpeg = fake_bin.join("ffmpeg");
+    fs::write(
+        &fake_ffmpeg,
+        "#!/bin/sh\nout=\"\"\nfor arg do\n  out=\"$arg\"\ndone\nprintf preview > \"$out\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_ffmpeg).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_ffmpeg, permissions).unwrap();
     fs::write(
         root.join("project.toml"),
         r#"
@@ -31,7 +43,15 @@ fn story_command_json_outputs_draft_summary() {
 
     let project_path = Utf8PathBuf::from_path_buf(root.join("project.toml")).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_cutline"))
-        .args(["story", project_path.as_str(), "--json"])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fake_bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .args(["story", project_path.as_str(), "--json", "--render-preview"])
         .output()
         .unwrap();
 
@@ -53,6 +73,7 @@ fn story_command_json_outputs_draft_summary() {
     assert!(root.join(".cutline/drafts/demo/references.json").is_file());
     assert!(root.join(".cutline/drafts/demo/narration.txt").is_file());
     assert!(root.join(".cutline/drafts/demo/subtitles.srt").is_file());
+    assert!(root.join(".cutline/drafts/demo/preview.mp4").is_file());
     assert!(root.join(".cutline/drafts/demo/assets").is_dir());
 
     let manifest: serde_json::Value = serde_json::from_str(
@@ -73,6 +94,10 @@ fn story_command_json_outputs_draft_summary() {
         "subtitles.srt"
     );
     assert_eq!(manifest["subtitle_style"]["platform"], "douyin");
+    assert_eq!(
+        manifest["generated_assets"]["preview"]["path"],
+        "preview.mp4"
+    );
 
     let references: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(root.join(".cutline/drafts/demo/references.json")).unwrap(),
@@ -92,6 +117,13 @@ fn story_command_json_outputs_draft_summary() {
             .iter()
             .any(|step| step["step"] == "subtitle"
                 && step["provider"] == "local_subtitle_provider")
+    );
+    assert!(
+        references["pipeline_step_runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["step"] == "preview" && step["provider"] == "ffmpeg")
     );
 
     let _ = fs::remove_dir_all(&root);

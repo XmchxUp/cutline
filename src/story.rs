@@ -6,11 +6,14 @@ use sha2::{Digest, Sha256};
 
 use crate::config::StoryVideoConfig;
 use crate::error::{CutlineError, Result};
+use crate::ffmpeg::{FfmpegCommand, story_preview_render_args};
 use crate::model::{NormalizedProject, StoryVideo};
+use crate::time::TimeValue;
 
 pub const DRAFT_SCHEMA_VERSION: &str = "cutline-draft-v1";
 const NARRATION_FILE: &str = "narration.txt";
 const SUBTITLES_FILE: &str = "subtitles.srt";
+const PREVIEW_FILE: &str = "preview.mp4";
 const SUBTITLE_MAX_CHARS_PER_LINE: usize = 18;
 const SUBTITLE_CUE_DURATION_MILLIS: u64 = 2_000;
 
@@ -18,6 +21,21 @@ const SUBTITLE_CUE_DURATION_MILLIS: u64 = 2_000;
 pub struct DraftPackageSummary {
     pub draft_id: String,
     pub package_path: Utf8PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct DraftPackageOptions {
+    pub render_preview: bool,
+    pub ffmpeg_program: String,
+}
+
+impl Default for DraftPackageOptions {
+    fn default() -> Self {
+        Self {
+            render_preview: false,
+            ffmpeg_program: "ffmpeg".to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +86,8 @@ pub struct ManifestOutput {
 pub struct GeneratedAssets {
     pub narration: ManifestAssetReference,
     pub subtitles: ManifestAssetReference,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<ManifestAssetReference>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +162,13 @@ pub fn generate_story_video(config: &StoryVideoConfig) -> StoryVideo {
 pub fn generate_reviewable_draft_package(
     project: &NormalizedProject,
 ) -> Result<DraftPackageSummary> {
+    generate_reviewable_draft_package_with_options(project, DraftPackageOptions::default())
+}
+
+pub fn generate_reviewable_draft_package_with_options(
+    project: &NormalizedProject,
+    options: DraftPackageOptions,
+) -> Result<DraftPackageSummary> {
     let story = project.story_videos.first().ok_or_else(|| {
         CutlineError::InvalidProject(
             "at least one [[story]] section is required to generate a draft package".to_owned(),
@@ -160,6 +187,35 @@ pub fn generate_reviewable_draft_package(
     let subtitles_text = format_srt(&subtitles);
     fs::write(package_path.join(NARRATION_FILE), &narration_text)?;
     fs::write(package_path.join(SUBTITLES_FILE), &subtitles_text)?;
+    let preview_path = package_path.join(PREVIEW_FILE);
+    let preview_command = if options.render_preview {
+        let command = FfmpegCommand {
+            program: options.ffmpeg_program.clone(),
+            args: story_preview_render_args(
+                &project.project_dir.join(&story.background),
+                &package_path.join(SUBTITLES_FILE),
+                preview_duration(&subtitles),
+                &preview_path,
+            ),
+        };
+        command.run()?;
+        if !preview_path.is_file() {
+            return Err(CutlineError::InvalidProject(format!(
+                "preview render did not create expected output: {preview_path}"
+            )));
+        }
+        Some(command)
+    } else {
+        None
+    };
+    let preview_asset = if options.render_preview {
+        Some(ManifestAssetReference {
+            path: Utf8PathBuf::from(PREVIEW_FILE),
+            fingerprint: file_fingerprint(&preview_path)?,
+        })
+    } else {
+        None
+    };
 
     let manifest = DraftManifest {
         schema_version: DRAFT_SCHEMA_VERSION.to_owned(),
@@ -193,6 +249,7 @@ pub fn generate_reviewable_draft_package(
                 path: Utf8PathBuf::from(SUBTITLES_FILE),
                 fingerprint: bytes_fingerprint(subtitles_text.as_bytes()),
             },
+            preview: preview_asset,
         },
         subtitle_style: default_subtitle_style(&story.platform),
         short_video_drafts: short_video_drafts.clone(),
@@ -206,45 +263,7 @@ pub fn generate_reviewable_draft_package(
         schema_version: DRAFT_SCHEMA_VERSION.to_owned(),
         draft_id: story.name.clone(),
         references: generated_reference_entries(&short_video_drafts[0], &subtitles),
-        pipeline_step_runs: vec![
-            PipelineStepRun {
-                step: "ingest".to_owned(),
-                status: "completed".to_owned(),
-                provider: "local".to_owned(),
-                parameters: serde_json::json!({}),
-                outputs: vec![],
-            },
-            PipelineStepRun {
-                step: "script".to_owned(),
-                status: "completed".to_owned(),
-                provider: "local_script_provider".to_owned(),
-                parameters: serde_json::json!({
-                    "engagement_angle": story.engagement_angle,
-                    "source": story.source,
-                    "start_line": story.start_line,
-                    "end_line": story.end_line,
-                }),
-                outputs: vec!["short_video_drafts[0]".to_owned()],
-            },
-            PipelineStepRun {
-                step: "subtitle".to_owned(),
-                status: "completed".to_owned(),
-                provider: "local_subtitle_provider".to_owned(),
-                parameters: serde_json::json!({
-                    "max_chars_per_line": SUBTITLE_MAX_CHARS_PER_LINE,
-                    "cue_duration_millis": SUBTITLE_CUE_DURATION_MILLIS,
-                    "subtitle_style": "douyin_default",
-                }),
-                outputs: vec![NARRATION_FILE.to_owned(), SUBTITLES_FILE.to_owned()],
-            },
-            PipelineStepRun {
-                step: "draft_package".to_owned(),
-                status: "completed".to_owned(),
-                provider: "local".to_owned(),
-                parameters: serde_json::json!({}),
-                outputs: vec!["draft.json".to_owned(), "references.json".to_owned()],
-            },
-        ],
+        pipeline_step_runs: pipeline_step_runs(story, preview_command.as_ref()),
     };
     let reference_json = serde_json::to_string_pretty(&reference_map)?;
     fs::write(
@@ -256,6 +275,68 @@ pub fn generate_reviewable_draft_package(
         draft_id: story.name.clone(),
         package_path,
     })
+}
+
+fn pipeline_step_runs(
+    story: &StoryVideo,
+    preview_command: Option<&FfmpegCommand>,
+) -> Vec<PipelineStepRun> {
+    let mut steps = vec![
+        PipelineStepRun {
+            step: "ingest".to_owned(),
+            status: "completed".to_owned(),
+            provider: "local".to_owned(),
+            parameters: serde_json::json!({}),
+            outputs: vec![],
+        },
+        PipelineStepRun {
+            step: "script".to_owned(),
+            status: "completed".to_owned(),
+            provider: "local_script_provider".to_owned(),
+            parameters: serde_json::json!({
+                "engagement_angle": story.engagement_angle,
+                "source": story.source,
+                "start_line": story.start_line,
+                "end_line": story.end_line,
+            }),
+            outputs: vec!["short_video_drafts[0]".to_owned()],
+        },
+        PipelineStepRun {
+            step: "subtitle".to_owned(),
+            status: "completed".to_owned(),
+            provider: "local_subtitle_provider".to_owned(),
+            parameters: serde_json::json!({
+                "max_chars_per_line": SUBTITLE_MAX_CHARS_PER_LINE,
+                "cue_duration_millis": SUBTITLE_CUE_DURATION_MILLIS,
+                "subtitle_style": "douyin_default",
+            }),
+            outputs: vec![NARRATION_FILE.to_owned(), SUBTITLES_FILE.to_owned()],
+        },
+    ];
+
+    if let Some(command) = preview_command {
+        steps.push(PipelineStepRun {
+            step: "preview".to_owned(),
+            status: "completed".to_owned(),
+            provider: "ffmpeg".to_owned(),
+            parameters: serde_json::json!({
+                "command": command.display(),
+                "program": command.program,
+                "args": command.args,
+                "output_path": PREVIEW_FILE,
+            }),
+            outputs: vec![PREVIEW_FILE.to_owned()],
+        });
+    }
+
+    steps.push(PipelineStepRun {
+        step: "draft_package".to_owned(),
+        status: "completed".to_owned(),
+        provider: "local".to_owned(),
+        parameters: serde_json::json!({}),
+        outputs: vec!["draft.json".to_owned(), "references.json".to_owned()],
+    });
+    steps
 }
 
 fn generated_reference_entries(
@@ -389,6 +470,15 @@ fn generate_subtitles(narration: &str) -> Vec<SubtitleCue> {
         .collect()
 }
 
+fn preview_duration(subtitles: &[SubtitleCue]) -> TimeValue {
+    TimeValue::from_millis(
+        subtitles
+            .last()
+            .map(|subtitle| subtitle.end_millis)
+            .unwrap_or(SUBTITLE_CUE_DURATION_MILLIS),
+    )
+}
+
 fn split_subtitle_text(text: &str, max_chars: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
@@ -498,6 +588,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     use camino::Utf8PathBuf;
 
@@ -569,6 +660,19 @@ mod tests {
         let minutes = parts.next().unwrap();
         let seconds = parts.next().unwrap();
         hours * 3_600_000 + minutes * 60_000 + seconds * 1_000 + millis.parse::<u64>().unwrap()
+    }
+
+    fn write_fake_ffmpeg(root: &std::path::Path) -> Utf8PathBuf {
+        let path = root.join("ffmpeg");
+        fs::write(
+            &path,
+            "#!/bin/sh\nout=\"\"\nfor arg do\n  out=\"$arg\"\ndone\nprintf preview > \"$out\"\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+        Utf8PathBuf::from_path_buf(path).unwrap()
     }
 
     #[test]
@@ -800,6 +904,72 @@ mod tests {
         assert_eq!(manifest["subtitle_style"]["aspect_ratio"], "9:16");
         assert_eq!(manifest["subtitle_style"]["max_chars_per_line"], 18);
         assert_eq!(manifest["subtitle_style"]["position"], "bottom_safe_area");
+    }
+
+    #[test]
+    fn draft_manifest_records_preview_asset_when_preview_render_requested() {
+        let fixture = DraftFixture::new("preview-manifest");
+        let ffmpeg = write_fake_ffmpeg(&fixture.root);
+
+        let summary = generate_reviewable_draft_package_with_options(
+            &fixture.project,
+            DraftPackageOptions {
+                render_preview: true,
+                ffmpeg_program: ffmpeg.to_string(),
+            },
+        )
+        .unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("draft.json")).unwrap(),
+        )
+        .unwrap();
+
+        assert!(summary.package_path.join("preview.mp4").is_file());
+        assert_eq!(
+            manifest["generated_assets"]["preview"]["path"],
+            "preview.mp4"
+        );
+        assert!(
+            manifest["generated_assets"]["preview"]["fingerprint"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+    }
+
+    #[test]
+    fn reference_map_records_preview_step_run_when_preview_render_requested() {
+        let fixture = DraftFixture::new("preview-step-run");
+        let ffmpeg = write_fake_ffmpeg(&fixture.root);
+
+        let summary = generate_reviewable_draft_package_with_options(
+            &fixture.project,
+            DraftPackageOptions {
+                render_preview: true,
+                ffmpeg_program: ffmpeg.to_string(),
+            },
+        )
+        .unwrap();
+        let reference_map: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("references.json")).unwrap(),
+        )
+        .unwrap();
+        let steps = reference_map["pipeline_step_runs"].as_array().unwrap();
+        let preview_step = steps
+            .iter()
+            .find(|step| step["step"] == "preview")
+            .expect("preview step run");
+
+        assert_eq!(preview_step["status"], "completed");
+        assert_eq!(preview_step["provider"], "ffmpeg");
+        assert_eq!(preview_step["parameters"]["output_path"], "preview.mp4");
+        assert!(
+            preview_step["parameters"]["command"]
+                .as_str()
+                .unwrap()
+                .contains("subtitles.srt")
+        );
+        assert_eq!(preview_step["outputs"][0], "preview.mp4");
     }
 
     #[test]

@@ -187,6 +187,45 @@ pub fn clip_render_args(
     args
 }
 
+pub fn story_preview_render_args(
+    background_path: &Utf8Path,
+    subtitles_path: &Utf8Path,
+    duration: TimeValue,
+    output_path: &Utf8Path,
+) -> Vec<String> {
+    let mut args = vec!["-y".to_owned()];
+    if is_static_image(background_path) {
+        args.extend(["-loop".to_owned(), "1".to_owned()]);
+    } else {
+        args.extend(["-stream_loop".to_owned(), "-1".to_owned()]);
+    }
+    args.extend([
+        "-i".to_owned(),
+        background_path.to_string(),
+        "-t".to_owned(),
+        duration.as_ffmpeg_seconds(),
+        "-vf".to_owned(),
+        format!(
+            "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,subtitles={}",
+            subtitles_path
+        ),
+        "-an".to_owned(),
+        "-c:v".to_owned(),
+        "libx264".to_owned(),
+        "-pix_fmt".to_owned(),
+        "yuv420p".to_owned(),
+        output_path.to_string(),
+    ]);
+    args
+}
+
+fn is_static_image(path: &Utf8Path) -> bool {
+    matches!(
+        path.extension().map(str::to_ascii_lowercase).as_deref(),
+        Some("jpg" | "jpeg" | "png" | "webp")
+    )
+}
+
 pub fn shell_quote(arg: &str) -> String {
     if arg.is_empty() {
         "''".to_owned()
@@ -214,7 +253,7 @@ mod tests {
     use crate::model::{Clip, Input};
     use crate::time::TimeValue;
 
-    use super::{clip_render_args, shell_quote};
+    use super::{clip_render_args, shell_quote, story_preview_render_args};
 
     #[test]
     fn builds_clip_render_args_with_effects() {
@@ -252,5 +291,41 @@ mod tests {
         assert_eq!(shell_quote("simple"), "simple");
         assert_eq!(shell_quote("has space"), "'has space'");
         assert_eq!(shell_quote("has'quote"), "'has'\\''quote'");
+    }
+
+    #[test]
+    fn builds_story_preview_args_for_vertical_subtitle_video() {
+        let args = story_preview_render_args(
+            "assets/bg.mp4".into(),
+            "drafts/demo/subtitles.srt".into(),
+            TimeValue::from_millis(6_000),
+            "drafts/demo/preview.mp4".into(),
+        );
+
+        assert!(args.windows(2).any(|pair| pair == ["-i", "assets/bg.mp4"]));
+        assert!(args.windows(2).any(|pair| pair == ["-t", "6.000"]));
+        let filter = args
+            .windows(2)
+            .find(|pair| pair[0] == "-vf")
+            .map(|pair| pair[1].as_str())
+            .expect("video filter");
+        assert!(filter.contains("scale=1080:1920"));
+        assert!(filter.contains("crop=1080:1920"));
+        assert!(filter.contains("subtitles=drafts/demo/subtitles.srt"));
+        assert_eq!(args.last().unwrap(), "drafts/demo/preview.mp4");
+    }
+
+    #[test]
+    fn builds_story_preview_args_for_static_image_background() {
+        let args = story_preview_render_args(
+            "assets/bg.png".into(),
+            "drafts/demo/subtitles.srt".into(),
+            TimeValue::from_millis(4_000),
+            "drafts/demo/preview.mp4".into(),
+        );
+
+        assert!(args.windows(2).any(|pair| pair == ["-loop", "1"]));
+        assert!(args.windows(2).any(|pair| pair == ["-i", "assets/bg.png"]));
+        assert!(!args.windows(2).any(|pair| pair == ["-stream_loop", "-1"]));
     }
 }
