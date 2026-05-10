@@ -40,8 +40,38 @@ pub enum Command {
         /// Overwrite an existing final output file.
         #[arg(long)]
         force: bool,
+
+        /// Execute AutoCut rendering.
+        #[arg(long)]
+        autocut: bool,
+
+        /// Execute StoryToVideo rendering.
+        #[arg(long)]
+        story: bool,
     },
 
     /// Remove this project's cache directory.
     Clean { project: Utf8PathBuf },
+
+    /// Generate AutoCut plan from project.
+    AutoCut {
+        project: Utf8PathBuf,
+
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Generate StoryToVideo plan from project.
+    Story {
+        project: Utf8PathBuf,
+
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// List available TTS voices.
+        #[arg(long)]
+        voice_list: bool,
+    },
 }

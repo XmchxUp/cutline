@@ -1,0 +1,11 @@
+[output]
+path = "dist/story_video.mp4"
+
+[[story]]
+name = "chapter1"
+start_line = 10
+end_line = 50
+source = "stories/chapter1.txt"
+engagement_angle = "reversal"
+background = "assets/default_background.mp4"
+platform = "douyin"

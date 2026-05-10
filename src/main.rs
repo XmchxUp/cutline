@@ -46,22 +46,33 @@ fn main() -> anyhow::Result<()> {
                 print_plan(&plan);
             }
         }
-        Command::Render { project, force } => {
-            let project = load_project(
-                &project,
-                ValidationOptions {
-                    require_inputs: true,
-                    probe_media: true,
-                },
-            )?;
-            if project.output_path.exists() && !force {
-                anyhow::bail!(
-                    "output file already exists: {}\nhint: pass --force to overwrite",
-                    project.output_path
-                );
+        Command::Render {
+            project,
+            force,
+            autocut,
+            story,
+        } => {
+            if autocut {
+                println!("AutoCut rendering not yet implemented");
+            } else if story {
+                println!("StoryToVideo rendering not yet implemented");
+            } else {
+                let project = load_project(
+                    &project,
+                    ValidationOptions {
+                        require_inputs: true,
+                        probe_media: true,
+                    },
+                )?;
+                if project.output_path.exists() && !force {
+                    anyhow::bail!(
+                        "output file already exists: {}\nhint: pass --force to overwrite",
+                        project.output_path
+                    );
+                }
+                let plan = build_plan(&project)?;
+                render_project(&project, &plan)?;
             }
-            let plan = build_plan(&project)?;
-            render_project(&project, &plan)?;
         }
         Command::Clean { project } => {
             let project = load_project(
@@ -78,6 +89,23 @@ fn main() -> anyhow::Result<()> {
                 println!("removed {cache_dir}");
             } else {
                 println!("cache directory does not exist: {cache_dir}");
+            }
+        }
+        Command::AutoCut {
+            project: _,
+            json: _,
+        } => {
+            println!("AutoCut command not yet implemented");
+        }
+        Command::Story {
+            project: _,
+            json: _,
+            voice_list,
+        } => {
+            if voice_list {
+                println!("Voice list not yet implemented");
+            } else {
+                println!("Story command not yet implemented");
             }
         }
     }

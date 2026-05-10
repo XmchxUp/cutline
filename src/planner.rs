@@ -220,6 +220,8 @@ mod tests {
                 blur,
                 mute: false,
             }],
+            auto_cuts: vec![],
+            story_videos: vec![],
         }
     }
 

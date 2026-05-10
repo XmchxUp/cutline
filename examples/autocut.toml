@@ -1,0 +1,17 @@
+[output]
+path = "dist/autocut_output.mp4"
+format = "mp4"
+aspect_ratio = "9:16"
+
+[input.main]
+path = "raw/vod.mp4"
+
+# AutoCut configuration
+[[auto_cut]]
+name = "main_autocut"
+input = "main"
+target_duration = "300s"      # Target total duration (5 minutes)
+clip_duration = "30s"         # Target individual clip duration
+min_clip_duration = "15s"     # Minimum clip length
+rules = ["scene_change", "audio_activity"]
+output_mode = "multiple"      # "single" or "multiple"
