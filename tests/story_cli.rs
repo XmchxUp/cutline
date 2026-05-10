@@ -53,5 +53,27 @@ fn story_command_json_outputs_draft_summary() {
     assert!(root.join(".cutline/drafts/demo/references.json").is_file());
     assert!(root.join(".cutline/drafts/demo/assets").is_dir());
 
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".cutline/drafts/demo/draft.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["short_video_drafts"][0]["id"], "demo-001");
+    assert_eq!(
+        manifest["short_video_drafts"][0]["hook"]["source_reference"]["source"],
+        "stories/demo.txt"
+    );
+
+    let references: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".cutline/drafts/demo/references.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        references["pipeline_step_runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["step"] == "script" && step["provider"] == "local_script_provider")
+    );
+
     let _ = fs::remove_dir_all(&root);
 }

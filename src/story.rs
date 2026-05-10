@@ -25,6 +25,7 @@ pub struct DraftManifest {
     pub story: ManifestStory,
     pub visual: ManifestVisual,
     pub output: ManifestOutput,
+    pub short_video_drafts: Vec<ShortVideoDraft>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,8 +62,16 @@ pub struct ManifestOutput {
 pub struct ReferenceMap {
     pub schema_version: String,
     pub draft_id: String,
-    pub references: Vec<serde_json::Value>,
+    pub references: Vec<ReferenceEntry>,
     pub pipeline_step_runs: Vec<PipelineStepRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReferenceEntry {
+    pub target: String,
+    pub source: Utf8PathBuf,
+    pub start_line: usize,
+    pub end_line: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +79,30 @@ pub struct PipelineStepRun {
     pub step: String,
     pub status: String,
     pub provider: String,
+    pub parameters: serde_json::Value,
     pub outputs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShortVideoDraft {
+    pub id: String,
+    pub hook: ScriptText,
+    pub content_beats: Vec<ScriptText>,
+    pub adapted_narration: ScriptText,
+    pub ending: ScriptText,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptText {
+    pub text: String,
+    pub source_reference: SourceReference,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceReference {
+    pub source: Utf8PathBuf,
+    pub start_line: usize,
+    pub end_line: usize,
 }
 
 /// Generate a StoryVideo from its configuration.
@@ -101,6 +133,7 @@ pub fn generate_reviewable_draft_package(
         .join("drafts")
         .join(&story.name);
     fs::create_dir_all(package_path.join("assets"))?;
+    let short_video_drafts = vec![generate_local_script_draft(&project.project_dir, story)?];
     let manifest = DraftManifest {
         schema_version: DRAFT_SCHEMA_VERSION.to_owned(),
         workflow: "StoryHighlightVideo".to_owned(),
@@ -124,6 +157,7 @@ pub fn generate_reviewable_draft_package(
         output: ManifestOutput {
             path: project_reference_path(&project.project_dir, &project.output_path),
         },
+        short_video_drafts: short_video_drafts.clone(),
     };
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     fs::write(
@@ -133,18 +167,32 @@ pub fn generate_reviewable_draft_package(
     let reference_map = ReferenceMap {
         schema_version: DRAFT_SCHEMA_VERSION.to_owned(),
         draft_id: story.name.clone(),
-        references: vec![],
+        references: script_reference_entries(&short_video_drafts[0]),
         pipeline_step_runs: vec![
             PipelineStepRun {
                 step: "ingest".to_owned(),
                 status: "completed".to_owned(),
                 provider: "local".to_owned(),
+                parameters: serde_json::json!({}),
                 outputs: vec![],
+            },
+            PipelineStepRun {
+                step: "script".to_owned(),
+                status: "completed".to_owned(),
+                provider: "local_script_provider".to_owned(),
+                parameters: serde_json::json!({
+                    "engagement_angle": story.engagement_angle,
+                    "source": story.source,
+                    "start_line": story.start_line,
+                    "end_line": story.end_line,
+                }),
+                outputs: vec!["short_video_drafts[0]".to_owned()],
             },
             PipelineStepRun {
                 step: "draft_package".to_owned(),
                 status: "completed".to_owned(),
                 provider: "local".to_owned(),
+                parameters: serde_json::json!({}),
                 outputs: vec!["draft.json".to_owned(), "references.json".to_owned()],
             },
         ],
@@ -158,6 +206,100 @@ pub fn generate_reviewable_draft_package(
     Ok(DraftPackageSummary {
         draft_id: story.name.clone(),
         package_path,
+    })
+}
+
+fn script_reference_entries(draft: &ShortVideoDraft) -> Vec<ReferenceEntry> {
+    let mut entries = Vec::new();
+    entries.push(reference_entry(format!("{}.hook", draft.id), &draft.hook));
+    for (index, beat) in draft.content_beats.iter().enumerate() {
+        entries.push(reference_entry(
+            format!("{}.content_beats[{index}]", draft.id),
+            beat,
+        ));
+    }
+    entries.push(reference_entry(
+        format!("{}.adapted_narration", draft.id),
+        &draft.adapted_narration,
+    ));
+    entries.push(reference_entry(
+        format!("{}.ending", draft.id),
+        &draft.ending,
+    ));
+    entries
+}
+
+fn reference_entry(target: String, text: &ScriptText) -> ReferenceEntry {
+    ReferenceEntry {
+        target,
+        source: text.source_reference.source.clone(),
+        start_line: text.source_reference.start_line,
+        end_line: text.source_reference.end_line,
+    }
+}
+
+fn generate_local_script_draft(
+    project_dir: &camino::Utf8Path,
+    story: &StoryVideo,
+) -> Result<ShortVideoDraft> {
+    let source_path = project_dir.join(&story.source);
+    let source = fs::read_to_string(&source_path)?;
+    let mut selected_lines = source
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let line_number = index + 1;
+            (story.start_line..=story.end_line)
+                .contains(&line_number)
+                .then(|| line.trim())
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if selected_lines.is_empty() {
+        selected_lines.push("选定文本暂未包含非空内容");
+    }
+
+    let first_line = selected_lines.first().copied().unwrap_or("");
+    let source_reference = SourceReference {
+        source: story.source.clone(),
+        start_line: story.start_line,
+        end_line: story.end_line,
+    };
+    let beat_count = selected_lines.len().clamp(3, 5);
+    let beats = (0..beat_count)
+        .map(|index| {
+            let line = selected_lines[index % selected_lines.len()];
+            ScriptText {
+                text: format!(
+                    "围绕{}推进第{}个看点：{line}",
+                    story.engagement_angle,
+                    index + 1
+                ),
+                source_reference: source_reference.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let beat_texts = beats
+        .iter()
+        .map(|beat| beat.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    Ok(ShortVideoDraft {
+        id: format!("{}-001", story.name),
+        hook: ScriptText {
+            text: format!("{}反转来了：{first_line}", story.engagement_angle),
+            source_reference: source_reference.clone(),
+        },
+        content_beats: beats,
+        adapted_narration: ScriptText {
+            text: beat_texts,
+            source_reference: source_reference.clone(),
+        },
+        ending: ScriptText {
+            text: "真正的爆点，才刚刚开始。".to_owned(),
+            source_reference,
+        },
     })
 }
 
@@ -232,14 +374,19 @@ mod tests {
 
     impl DraftFixture {
         fn new(name: &str) -> Self {
+            Self::with_source(name, "第一行\n第二行\n第三行\n")
+        }
+
+        fn with_source(name: &str, source: &str) -> Self {
             let root = std::env::temp_dir()
                 .join(format!("cutline-story-draft-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(root.join("stories")).unwrap();
             fs::create_dir_all(root.join("assets")).unwrap();
-            fs::write(root.join("stories/demo.txt"), "第一行\n第二行\n第三行\n").unwrap();
+            fs::write(root.join("stories/demo.txt"), source).unwrap();
             fs::write(root.join("assets/bg.mp4"), "not real media").unwrap();
 
+            let end_line = source.lines().count();
             let project_path = Utf8PathBuf::from_path_buf(root.join("project.toml")).unwrap();
             let project = normalize_project_with_options(
                 &project_path,
@@ -255,7 +402,7 @@ mod tests {
                         name: "demo".to_owned(),
                         source: Utf8PathBuf::from("stories/demo.txt"),
                         start_line: 1,
-                        end_line: 3,
+                        end_line,
                         engagement_angle: "reversal".to_owned(),
                         background: Utf8PathBuf::from("assets/bg.mp4"),
                         platform: "douyin".to_owned(),
@@ -354,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_map_records_initial_pipeline_step_runs() {
+    fn reference_map_records_draft_package_step_runs() {
         let fixture = DraftFixture::new("step-runs");
 
         let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
@@ -365,14 +512,145 @@ mod tests {
 
         assert_eq!(reference_map["schema_version"], DRAFT_SCHEMA_VERSION);
         assert_eq!(reference_map["draft_id"], "demo");
-        assert!(reference_map["references"].as_array().unwrap().is_empty());
         let steps = reference_map["pipeline_step_runs"].as_array().unwrap();
-        assert_eq!(steps[0]["step"], "ingest");
-        assert_eq!(steps[0]["status"], "completed");
-        assert_eq!(steps[0]["provider"], "local");
-        assert_eq!(steps[1]["step"], "draft_package");
-        assert_eq!(steps[1]["status"], "completed");
-        assert_eq!(steps[1]["outputs"][0], "draft.json");
-        assert_eq!(steps[1]["outputs"][1], "references.json");
+        let ingest_step = steps
+            .iter()
+            .find(|step| step["step"] == "ingest")
+            .expect("ingest step run");
+        assert_eq!(ingest_step["status"], "completed");
+        assert_eq!(ingest_step["provider"], "local");
+
+        let package_step = steps
+            .iter()
+            .find(|step| step["step"] == "draft_package")
+            .expect("draft package step run");
+        assert_eq!(package_step["status"], "completed");
+        assert_eq!(package_step["outputs"][0], "draft.json");
+        assert_eq!(package_step["outputs"][1], "references.json");
+    }
+
+    #[test]
+    fn draft_manifest_records_local_script_short_video_draft() {
+        let fixture = DraftFixture::new("local-script");
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("draft.json")).unwrap(),
+        )
+        .unwrap();
+
+        let drafts = manifest["short_video_drafts"].as_array().unwrap();
+        assert_eq!(drafts.len(), 1);
+        let draft = &drafts[0];
+        assert_eq!(draft["id"], "demo-001");
+        assert!(draft["hook"]["text"].as_str().unwrap().contains("reversal"));
+        let beats = draft["content_beats"].as_array().unwrap();
+        assert!((3..=5).contains(&beats.len()));
+        assert!(
+            !draft["adapted_narration"]["text"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!draft["ending"]["text"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn local_script_draft_keeps_three_to_five_beats_for_short_source_ranges() {
+        let fixture = DraftFixture::with_source("short-script-range", "第一行\n第二行\n");
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("draft.json")).unwrap(),
+        )
+        .unwrap();
+
+        let beats = manifest["short_video_drafts"][0]["content_beats"]
+            .as_array()
+            .unwrap();
+        assert!((3..=5).contains(&beats.len()));
+    }
+
+    #[test]
+    fn local_script_draft_records_source_references() {
+        let fixture = DraftFixture::new("script-references");
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("draft.json")).unwrap(),
+        )
+        .unwrap();
+        let draft = &manifest["short_video_drafts"][0];
+
+        for path in [
+            &draft["hook"],
+            &draft["content_beats"][0],
+            &draft["adapted_narration"],
+            &draft["ending"],
+        ] {
+            assert_eq!(path["source_reference"]["source"], "stories/demo.txt");
+            assert_eq!(path["source_reference"]["start_line"], 1);
+            assert_eq!(path["source_reference"]["end_line"], 3);
+        }
+    }
+
+    #[test]
+    fn reference_map_records_script_source_references() {
+        let fixture = DraftFixture::new("script-reference-map");
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let reference_map: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("references.json")).unwrap(),
+        )
+        .unwrap();
+
+        let references = reference_map["references"].as_array().unwrap();
+        assert!(
+            references
+                .iter()
+                .any(|reference| reference["target"] == "demo-001.hook")
+        );
+        assert!(
+            references
+                .iter()
+                .any(|reference| reference["target"] == "demo-001.content_beats[0]")
+        );
+        assert!(
+            references
+                .iter()
+                .any(|reference| reference["target"] == "demo-001.adapted_narration")
+        );
+        assert!(
+            references
+                .iter()
+                .any(|reference| reference["target"] == "demo-001.ending")
+        );
+        assert!(references.iter().all(|reference| {
+            reference["source"] == "stories/demo.txt"
+                && reference["start_line"] == 1
+                && reference["end_line"] == 3
+        }));
+    }
+
+    #[test]
+    fn reference_map_records_local_script_step_run() {
+        let fixture = DraftFixture::new("script-step-run");
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let reference_map: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("references.json")).unwrap(),
+        )
+        .unwrap();
+        let steps = reference_map["pipeline_step_runs"].as_array().unwrap();
+        let script_step = steps
+            .iter()
+            .find(|step| step["step"] == "script")
+            .expect("script step run");
+
+        assert_eq!(script_step["status"], "completed");
+        assert_eq!(script_step["provider"], "local_script_provider");
+        assert_eq!(script_step["parameters"]["engagement_angle"], "reversal");
+        assert_eq!(script_step["parameters"]["source"], "stories/demo.txt");
+        assert_eq!(script_step["outputs"][0], "short_video_drafts[0]");
     }
 }
