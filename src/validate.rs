@@ -163,6 +163,14 @@ fn validate_story_video_configs(
                 story.platform
             )));
         }
+        if let Some(provider) = &story.voice_provider {
+            if provider != "diamoetts" {
+                return Err(CutlineError::InvalidProject(format!(
+                    "story[{index}].voice_provider must be \"diamoetts\" when set in V1, got {:?}",
+                    provider
+                )));
+            }
+        }
 
         let source = resolve_project_path(project_dir, &story.source);
         if source.extension() != Some("txt") {
@@ -390,6 +398,7 @@ mod tests {
             end_line: 2,
             engagement_angle: "reversal".to_owned(),
             background: Utf8PathBuf::from("assets/bg.mp4"),
+            voice_provider: None,
             platform: "douyin".to_owned(),
         }
     }
@@ -539,6 +548,22 @@ mod tests {
 
         assert!(err.contains("story[0].platform"));
         assert!(err.contains("douyin"));
+    }
+
+    #[test]
+    fn story_highlight_video_rejects_unknown_voice_provider() {
+        let fixture = StoryFixture::new("unsupported-voice-provider");
+        fixture.write_story("stories/demo.txt", "第一行\n第二行\n");
+        fixture.write_background("assets/bg.mp4");
+        let mut story = valid_story_video_config();
+        story.voice_provider = Some("unknown-tts".to_owned());
+
+        let err = normalize_story_fixture(&fixture, story)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("story[0].voice_provider"));
+        assert!(err.contains("diamoetts"));
     }
 
     #[test]

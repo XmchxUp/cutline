@@ -133,6 +133,7 @@ fn run_story_command(
         cutline::story::DraftPackageOptions {
             render_preview,
             ffmpeg_program: "ffmpeg".to_owned(),
+            voice_provider: cutline::story::VoiceProviderConfig::None,
         },
     )?;
 

@@ -92,6 +92,7 @@ pub struct StoryVideo {
     pub end_line: usize,
     pub engagement_angle: String,
     pub background: Utf8PathBuf,
+    pub voice_provider: Option<String>,
     pub platform: String,
 }
 

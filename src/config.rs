@@ -108,6 +108,9 @@ pub struct StoryVideoConfig {
     pub engagement_angle: String,
     pub background: Utf8PathBuf,
 
+    #[serde(default)]
+    pub voice_provider: Option<String>,
+
     #[serde(default = "default_platform")]
     pub platform: String,
 }
@@ -249,6 +252,32 @@ mod tests {
         assert_eq!(config.story_videos.len(), 1);
         assert_eq!(config.story_videos[0].source, "stories/chapter1.txt");
         assert_eq!(config.story_videos[0].platform, "douyin");
+    }
+
+    #[test]
+    fn parses_optional_diamoetts_story_voice_provider() {
+        let config = toml::from_str::<ProjectConfig>(
+            r#"
+            [output]
+            path = "dist/story.mp4"
+
+            [[story]]
+            name = "demo"
+            source = "stories/demo.txt"
+            start_line = 1
+            end_line = 2
+            engagement_angle = "reversal"
+            background = "assets/bg.mp4"
+            voice_provider = "diamoetts"
+            platform = "douyin"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.story_videos[0].voice_provider.as_deref(),
+            Some("diamoetts")
+        );
     }
 
     #[test]

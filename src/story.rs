@@ -14,6 +14,7 @@ pub const DRAFT_SCHEMA_VERSION: &str = "cutline-draft-v1";
 const NARRATION_FILE: &str = "narration.txt";
 const SUBTITLES_FILE: &str = "subtitles.srt";
 const PREVIEW_FILE: &str = "preview.mp4";
+const VOICEOVER_FILE: &str = "voiceover.wav";
 const SUBTITLE_MAX_CHARS_PER_LINE: usize = 18;
 const SUBTITLE_CUE_DURATION_MILLIS: u64 = 2_000;
 
@@ -27,6 +28,7 @@ pub struct DraftPackageSummary {
 pub struct DraftPackageOptions {
     pub render_preview: bool,
     pub ffmpeg_program: String,
+    pub voice_provider: VoiceProviderConfig,
 }
 
 impl Default for DraftPackageOptions {
@@ -34,8 +36,16 @@ impl Default for DraftPackageOptions {
         Self {
             render_preview: false,
             ffmpeg_program: "ffmpeg".to_owned(),
+            voice_provider: VoiceProviderConfig::None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum VoiceProviderConfig {
+    None,
+    DiamoETts,
+    Test { audio_bytes: Vec<u8> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +98,8 @@ pub struct GeneratedAssets {
     pub subtitles: ManifestAssetReference,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview: Option<ManifestAssetReference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voiceover: Option<ManifestAssetReference>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +167,7 @@ pub fn generate_story_video(config: &StoryVideoConfig) -> StoryVideo {
         end_line: config.end_line,
         engagement_angle: config.engagement_angle.clone(),
         background: config.background.clone(),
+        voice_provider: config.voice_provider.clone(),
         platform: config.platform.clone(),
     }
 }
@@ -187,6 +200,8 @@ pub fn generate_reviewable_draft_package_with_options(
     let subtitles_text = format_srt(&subtitles);
     fs::write(package_path.join(NARRATION_FILE), &narration_text)?;
     fs::write(package_path.join(SUBTITLES_FILE), &subtitles_text)?;
+    let voice_provider = selected_voice_provider(story, options.voice_provider);
+    let voice_step = run_voice_step(&package_path, &voice_provider)?;
     let preview_path = package_path.join(PREVIEW_FILE);
     let preview_command = if options.render_preview {
         let command = FfmpegCommand {
@@ -250,6 +265,7 @@ pub fn generate_reviewable_draft_package_with_options(
                 fingerprint: bytes_fingerprint(subtitles_text.as_bytes()),
             },
             preview: preview_asset,
+            voiceover: voice_step.asset.clone(),
         },
         subtitle_style: default_subtitle_style(&story.platform),
         short_video_drafts: short_video_drafts.clone(),
@@ -263,7 +279,11 @@ pub fn generate_reviewable_draft_package_with_options(
         schema_version: DRAFT_SCHEMA_VERSION.to_owned(),
         draft_id: story.name.clone(),
         references: generated_reference_entries(&short_video_drafts[0], &subtitles),
-        pipeline_step_runs: pipeline_step_runs(story, preview_command.as_ref()),
+        pipeline_step_runs: pipeline_step_runs(
+            story,
+            &voice_step.step_run,
+            preview_command.as_ref(),
+        ),
     };
     let reference_json = serde_json::to_string_pretty(&reference_map)?;
     fs::write(
@@ -279,6 +299,7 @@ pub fn generate_reviewable_draft_package_with_options(
 
 fn pipeline_step_runs(
     story: &StoryVideo,
+    voice_step: &PipelineStepRun,
     preview_command: Option<&FfmpegCommand>,
 ) -> Vec<PipelineStepRun> {
     let mut steps = vec![
@@ -312,6 +333,7 @@ fn pipeline_step_runs(
             }),
             outputs: vec![NARRATION_FILE.to_owned(), SUBTITLES_FILE.to_owned()],
         },
+        voice_step.clone(),
     ];
 
     if let Some(command) = preview_command {
@@ -337,6 +359,76 @@ fn pipeline_step_runs(
         outputs: vec!["draft.json".to_owned(), "references.json".to_owned()],
     });
     steps
+}
+
+fn selected_voice_provider(
+    story: &StoryVideo,
+    requested: VoiceProviderConfig,
+) -> VoiceProviderConfig {
+    match requested {
+        VoiceProviderConfig::None => match story.voice_provider.as_deref() {
+            Some("diamoetts") => VoiceProviderConfig::DiamoETts,
+            _ => VoiceProviderConfig::None,
+        },
+        provider => provider,
+    }
+}
+
+struct VoiceStepResult {
+    asset: Option<ManifestAssetReference>,
+    step_run: PipelineStepRun,
+}
+
+fn run_voice_step(
+    package_path: &camino::Utf8Path,
+    provider: &VoiceProviderConfig,
+) -> Result<VoiceStepResult> {
+    match provider {
+        VoiceProviderConfig::None => Ok(VoiceStepResult {
+            asset: None,
+            step_run: PipelineStepRun {
+                step: "voice".to_owned(),
+                status: "skipped".to_owned(),
+                provider: "none".to_owned(),
+                parameters: serde_json::json!({
+                    "reason": "no voice provider configured",
+                }),
+                outputs: vec![],
+            },
+        }),
+        VoiceProviderConfig::DiamoETts => Ok(VoiceStepResult {
+            asset: None,
+            step_run: PipelineStepRun {
+                step: "voice".to_owned(),
+                status: "skipped".to_owned(),
+                provider: "diamoetts".to_owned(),
+                parameters: serde_json::json!({
+                    "reason": "diamoetts provider declared but no local model configured",
+                    "optional": true,
+                }),
+                outputs: vec![],
+            },
+        }),
+        VoiceProviderConfig::Test { audio_bytes } => {
+            let path = package_path.join(VOICEOVER_FILE);
+            fs::write(&path, audio_bytes)?;
+            Ok(VoiceStepResult {
+                asset: Some(ManifestAssetReference {
+                    path: Utf8PathBuf::from(VOICEOVER_FILE),
+                    fingerprint: file_fingerprint(&path)?,
+                }),
+                step_run: PipelineStepRun {
+                    step: "voice".to_owned(),
+                    status: "completed".to_owned(),
+                    provider: "test_voice_provider".to_owned(),
+                    parameters: serde_json::json!({
+                        "source": NARRATION_FILE,
+                    }),
+                    outputs: vec![VOICEOVER_FILE.to_owned()],
+                },
+            })
+        }
+    }
 }
 
 fn generated_reference_entries(
@@ -633,6 +725,7 @@ mod tests {
                         end_line,
                         engagement_angle: "reversal".to_owned(),
                         background: Utf8PathBuf::from("assets/bg.mp4"),
+                        voice_provider: None,
                         platform: "douyin".to_owned(),
                     }],
                 },
@@ -684,6 +777,7 @@ mod tests {
             end_line: 50,
             engagement_angle: "reversal".to_string(),
             background: "assets/bg.mp4".into(),
+            voice_provider: None,
             platform: "douyin".to_string(),
         };
 
@@ -916,6 +1010,7 @@ mod tests {
             DraftPackageOptions {
                 render_preview: true,
                 ffmpeg_program: ffmpeg.to_string(),
+                voice_provider: VoiceProviderConfig::None,
             },
         )
         .unwrap();
@@ -947,6 +1042,7 @@ mod tests {
             DraftPackageOptions {
                 render_preview: true,
                 ffmpeg_program: ffmpeg.to_string(),
+                voice_provider: VoiceProviderConfig::None,
             },
         )
         .unwrap();
@@ -1114,5 +1210,119 @@ mod tests {
         assert_eq!(subtitle_step["parameters"]["cue_duration_millis"], 2000);
         assert_eq!(subtitle_step["outputs"][0], "narration.txt");
         assert_eq!(subtitle_step["outputs"][1], "subtitles.srt");
+    }
+
+    #[test]
+    fn reference_map_records_skipped_voice_step_when_no_voice_provider_configured() {
+        let fixture = DraftFixture::new("voice-skipped");
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let reference_map: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("references.json")).unwrap(),
+        )
+        .unwrap();
+        let steps = reference_map["pipeline_step_runs"].as_array().unwrap();
+        let voice_step = steps
+            .iter()
+            .find(|step| step["step"] == "voice")
+            .expect("voice step run");
+
+        assert_eq!(voice_step["status"], "skipped");
+        assert_eq!(voice_step["provider"], "none");
+        assert_eq!(
+            voice_step["parameters"]["reason"],
+            "no voice provider configured"
+        );
+        assert!(voice_step["outputs"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reference_map_records_diamoetts_voice_provider_as_skipped_without_local_model() {
+        let mut fixture = DraftFixture::new("voice-diamoetts-skipped");
+        fixture.project.story_videos[0].voice_provider = Some("diamoetts".to_owned());
+
+        let summary = generate_reviewable_draft_package(&fixture.project).unwrap();
+        let reference_map: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("references.json")).unwrap(),
+        )
+        .unwrap();
+        let steps = reference_map["pipeline_step_runs"].as_array().unwrap();
+        let voice_step = steps
+            .iter()
+            .find(|step| step["step"] == "voice")
+            .expect("voice step run");
+
+        assert_eq!(voice_step["status"], "skipped");
+        assert_eq!(voice_step["provider"], "diamoetts");
+        assert_eq!(
+            voice_step["parameters"]["reason"],
+            "diamoetts provider declared but no local model configured"
+        );
+    }
+
+    #[test]
+    fn draft_manifest_records_voiceover_asset_when_test_voice_provider_completes() {
+        let fixture = DraftFixture::new("voice-completed-manifest");
+
+        let summary = generate_reviewable_draft_package_with_options(
+            &fixture.project,
+            DraftPackageOptions {
+                render_preview: false,
+                ffmpeg_program: "ffmpeg".to_owned(),
+                voice_provider: VoiceProviderConfig::Test {
+                    audio_bytes: b"fake wav".to_vec(),
+                },
+            },
+        )
+        .unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("draft.json")).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(summary.package_path.join("voiceover.wav")).unwrap(),
+            b"fake wav"
+        );
+        assert_eq!(
+            manifest["generated_assets"]["voiceover"]["path"],
+            "voiceover.wav"
+        );
+        assert!(
+            manifest["generated_assets"]["voiceover"]["fingerprint"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+    }
+
+    #[test]
+    fn reference_map_records_completed_voice_step_when_test_voice_provider_completes() {
+        let fixture = DraftFixture::new("voice-completed-step");
+
+        let summary = generate_reviewable_draft_package_with_options(
+            &fixture.project,
+            DraftPackageOptions {
+                render_preview: false,
+                ffmpeg_program: "ffmpeg".to_owned(),
+                voice_provider: VoiceProviderConfig::Test {
+                    audio_bytes: b"fake wav".to_vec(),
+                },
+            },
+        )
+        .unwrap();
+        let reference_map: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(summary.package_path.join("references.json")).unwrap(),
+        )
+        .unwrap();
+        let steps = reference_map["pipeline_step_runs"].as_array().unwrap();
+        let voice_step = steps
+            .iter()
+            .find(|step| step["step"] == "voice")
+            .expect("voice step run");
+
+        assert_eq!(voice_step["status"], "completed");
+        assert_eq!(voice_step["provider"], "test_voice_provider");
+        assert_eq!(voice_step["outputs"][0], "voiceover.wav");
     }
 }

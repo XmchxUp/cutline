@@ -125,6 +125,15 @@ fn story_command_json_outputs_draft_summary() {
             .iter()
             .any(|step| step["step"] == "preview" && step["provider"] == "ffmpeg")
     );
+    assert!(
+        references["pipeline_step_runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["step"] == "voice"
+                && step["status"] == "skipped"
+                && step["provider"] == "none")
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
