@@ -1,9 +1,6 @@
 # Cutline
 
-Cutline is a Rust video cutting tool inspired by
-[tsoding/markut](https://github.com/tsoding/markut). It is not compatible with
-Markut's stack language. Cutline uses a declarative TOML project file and turns
-a linear clip sequence into cached ffmpeg renders plus a final concat output.
+Cutline is a Rust video cutting tool.
 
 ## Status
 
