@@ -1,152 +1,75 @@
 # Cutline
 
-Cutline is a Rust video cutting tool.
+Cutline is a Rust CLI for declarative video cutting and reviewable short-video
+draft generation.
 
-## Status
+## Current State
 
-Cutline currently has two usable V1 paths.
+Implemented:
 
-Manual video cutting is implemented:
+- Manual linear video cutting from TOML.
+- AutoCut plan generation and rendering through the cached clip pipeline.
+- StoryHighlightVideo reviewable draft packages with narration, subtitles,
+  source references, step-run records, and optional 9:16 preview rendering.
 
-- TOML project files
-- linear single-track clip sequences
-- multiple named inputs
-- millisecond timestamp precision
-- clip cache under the project-local `.cutline/` directory
-- `check`, `plan`, `render`, and `clean` CLI commands
+Still limited:
 
-StoryHighlightVideo reviewable drafts are also implemented:
+- Manual rendering is single-track only.
+- AutoCut uses ffmpeg-based scene/audio analysis with deterministic fallback.
+- StoryHighlightVideo final render currently exports the generated preview;
+  real TTS provider integration is not wired in yet.
 
-- validates a local text source range and local background asset
-- writes a reviewable draft package under `.cutline/drafts/<story-name>/`
-- creates deterministic local short-video script drafts with hook, 3-5 beats,
-  adapted narration, ending, and source references
-- writes editable `narration.txt` and readable `subtitles.srt`
-- can render a 9:16 `preview.mp4` from the configured background and subtitles
-  with `cutline story --render-preview`
-- records generated assets, source references, and provider step runs in
-  `draft.json` and `references.json`
-- records an explicit voice step as skipped when no TTS provider is configured
-- accepts `voice_provider = "diamoetts"` as an optional future/local provider
-  target, but does not download models or require DiaMoE-TTS at runtime
+Requires `ffmpeg` for rendering and `ffprobe` for media probing.
 
-GitHub issue progress: StoryHighlightVideo child issues #2 through #7 are
-closed; parent issue #1 remains open as the umbrella tracking item.
-
-`render` and preview rendering require `ffmpeg`; media probing requires
-`ffprobe`.
-
-## Manual Cut Example
-
-```toml
-[output]
-path = "dist/output.mp4"
-
-[input.main]
-path = "raw/vod.mp4"
-
-[input.brb]
-path = "raw/brb.mp4"
-
-[render]
-video_codec = "libx264"
-audio_codec = "aac"
-video_bitrate = "4000k"
-audio_bitrate = "300k"
-preset = "veryfast"
-crf = 23
-
-[render.extra]
-input_args = ["-hwaccel", "auto"]
-output_args = ["-movflags", "+faststart"]
-
-[[clip]]
-input = "main"
-start = "00:10:00"
-end = "00:15:00"
-chapter = "Opening"
-
-[[clip]]
-input = "brb"
-start = "0s"
-end = "15s"
-mute = true
-chapter = "Break"
-
-[[clip]]
-input = "main"
-start = "01:20:00.000"
-end = "01:28:30.500"
-blur = true
-chapter = "Main topic"
-```
-
-Relative paths are resolved relative to the project file location, not the
-current working directory.
-
-## Planned CLI
+## Quick Commands
 
 ```console
 $ cutline check project.toml
-$ cutline check project.toml --no-probe
-$ cutline plan project.toml
-$ cutline plan project.toml --no-probe
 $ cutline plan project.toml --json
-$ cutline render project.toml
 $ cutline render project.toml --force
-$ cutline clean project.toml
-$ cutline story project.toml
-$ cutline story project.toml --json
-$ cutline story project.toml --json --render-preview
-```
 
-`render` refuses to overwrite an existing output unless `--force` is passed.
+$ cutline autocut examples/autocut.toml --json
+$ cutline render examples/autocut.toml --autocut
 
-## StoryHighlightVideo Example
-
-```toml
-[output]
-path = "dist/story_video.mp4"
-
-[[story]]
-name = "chapter1"
-source = "stories/chapter1.txt"
-start_line = 10
-end_line = 50
-engagement_angle = "reversal"
-background = "assets/default_background.mp4"
-platform = "douyin"
-
-# Optional future/local TTS target. This is recorded as a skipped voice step
-# unless a local provider implementation and model are configured later.
-voice_provider = "diamoetts"
-```
-
-Generate the reviewable package:
-
-```console
 $ cutline story examples/story.toml --json
-```
-
-Generate the package and render a local preview:
-
-```console
 $ cutline story examples/story.toml --json --render-preview
+$ cutline render examples/story.toml --story
+$ cutline clean project.toml
 ```
 
-The package is written to `.cutline/drafts/<story-name>/` and contains:
+`render` refuses to overwrite existing outputs unless `--force` is passed.
 
-- `draft.json`: manifest, StoryHighlightVideo draft data, generated asset
-  fingerprints, subtitle style, and optional preview/voiceover asset metadata
-- `references.json`: source references and pipeline step runs
-- `narration.txt`: editable adapted narration
-- `subtitles.srt`: readable short-line SRT subtitles
-- `preview.mp4`: generated only when `--render-preview` is passed
+## Inputs
 
-StoryHighlightVideo is currently a reviewable-draft workflow, not a full final
-publish render. Real TTS audio generation is not wired in yet; the voice step is
-audited as skipped unless a test/local provider is supplied by code.
+Use the examples as the source of truth for project TOML shape:
 
-## Design
+- Manual cuts: [examples/basic.toml](examples/basic.toml)
+- AutoCut: [examples/autocut.toml](examples/autocut.toml)
+- StoryHighlightVideo: [examples/story.toml](examples/story.toml)
+- Minimal smoke project: [examples/smoke.toml](examples/smoke.toml)
 
-See [docs/DESIGN.md](docs/DESIGN.md).
+Relative paths are resolved relative to the project file, not the current
+working directory.
+
+## Outputs
+
+- Manual render writes `[output].path`.
+- AutoCut `output_mode = "single"` writes `[output].path`.
+- AutoCut `output_mode = "multiple"` writes one file per candidate next to the
+  configured output, named like `autocut_output-main_autocut-001.mp4`.
+- StoryHighlightVideo writes `.cutline/drafts/<story-name>/` with `draft.json`,
+  `references.json`, `narration.txt`, `subtitles.srt`, and optional
+  `preview.mp4`.
+- StoryHighlightVideo render writes `[output].path` from the generated preview.
+
+## References
+
+- Design overview: [docs/DESIGN.md](docs/DESIGN.md)
+- Domain language and current context: [CONTEXT.md](CONTEXT.md)
+- AutoCut and StoryToVideo ADR: [docs/adr/0001-autocut-and-story-to-video.md](docs/adr/0001-autocut-and-story-to-video.md)
+- Reviewable draft package ADR: [docs/adr/0002-reviewable-draft-package-directory.md](docs/adr/0002-reviewable-draft-package-directory.md)
+- Draft source media refs ADR: [docs/adr/0003-draft-packages-reference-source-media.md](docs/adr/0003-draft-packages-reference-source-media.md)
+- Creative pipeline ADR: [docs/adr/0004-shared-creative-pipeline.md](docs/adr/0004-shared-creative-pipeline.md)
+- Platform profiles ADR: [docs/adr/0005-platform-rules-as-profiles.md](docs/adr/0005-platform-rules-as-profiles.md)
+- Provider replacement ADR: [docs/adr/0006-creative-providers-are-replaceable.md](docs/adr/0006-creative-providers-are-replaceable.md)
+- Step-run records ADR: [docs/adr/0007-draft-packages-record-step-runs.md](docs/adr/0007-draft-packages-record-step-runs.md)

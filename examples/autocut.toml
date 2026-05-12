@@ -1,7 +1,5 @@
 [output]
 path = "dist/autocut_output.mp4"
-format = "mp4"
-aspect_ratio = "9:16"
 
 [input.main]
 path = "raw/vod.mp4"

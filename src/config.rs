@@ -76,26 +76,71 @@ pub struct AutoCutConfig {
     pub output_mode: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AutoCutRuleConfig {
-    #[serde(rename = "scene_change")]
-    SceneChange {
-        #[serde(default = "default_scene_threshold")]
-        threshold: f64,
-    },
+    SceneChange { threshold: f64 },
 
-    #[serde(rename = "audio_activity")]
-    AudioActivity {
-        #[serde(default = "default_audio_threshold")]
-        threshold: f64,
-    },
+    AudioActivity { threshold: f64 },
 
-    #[serde(rename = "motion")]
-    Motion {
-        #[serde(default = "default_motion_threshold")]
-        threshold: f64,
-    },
+    Motion { threshold: f64 },
+}
+
+impl<'de> Deserialize<'de> for AutoCutRuleConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ThresholdConfig {
+            #[serde(default)]
+            threshold: Option<f64>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(untagged)]
+        enum RawRule {
+            Name(String),
+            SceneChange { scene_change: ThresholdConfig },
+            AudioActivity { audio_activity: ThresholdConfig },
+            Motion { motion: ThresholdConfig },
+        }
+
+        match RawRule::deserialize(deserializer)? {
+            RawRule::Name(name) => rule_from_name(&name).map_err(serde::de::Error::custom),
+            RawRule::SceneChange { scene_change } => Ok(AutoCutRuleConfig::SceneChange {
+                threshold: scene_change
+                    .threshold
+                    .unwrap_or_else(default_scene_threshold),
+            }),
+            RawRule::AudioActivity { audio_activity } => Ok(AutoCutRuleConfig::AudioActivity {
+                threshold: audio_activity
+                    .threshold
+                    .unwrap_or_else(default_audio_threshold),
+            }),
+            RawRule::Motion { motion } => Ok(AutoCutRuleConfig::Motion {
+                threshold: motion.threshold.unwrap_or_else(default_motion_threshold),
+            }),
+        }
+    }
+}
+
+fn rule_from_name(name: &str) -> std::result::Result<AutoCutRuleConfig, String> {
+    match name {
+        "scene_change" => Ok(AutoCutRuleConfig::SceneChange {
+            threshold: default_scene_threshold(),
+        }),
+        "audio_activity" => Ok(AutoCutRuleConfig::AudioActivity {
+            threshold: default_audio_threshold(),
+        }),
+        "motion" => Ok(AutoCutRuleConfig::Motion {
+            threshold: default_motion_threshold(),
+        }),
+        _ => Err(format!(
+            "unknown AutoCut rule {name:?}; expected scene_change, audio_activity, or motion"
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -252,6 +297,54 @@ mod tests {
         assert_eq!(config.story_videos.len(), 1);
         assert_eq!(config.story_videos[0].source, "stories/chapter1.txt");
         assert_eq!(config.story_videos[0].platform, "douyin");
+    }
+
+    #[test]
+    fn parses_autocut_example() {
+        let config: ProjectConfig =
+            toml::from_str(include_str!("../examples/autocut.toml")).unwrap();
+
+        assert_eq!(config.input.len(), 1);
+        assert_eq!(config.clips.len(), 0);
+        assert_eq!(config.auto_cuts.len(), 1);
+        assert_eq!(config.auto_cuts[0].rules.len(), 2);
+    }
+
+    #[test]
+    fn parses_autocut_rule_names_with_default_thresholds() {
+        let config = toml::from_str::<ProjectConfig>(
+            r#"
+            [output]
+            path = "dist/autocut.mp4"
+
+            [input.main]
+            path = "raw/vod.mp4"
+
+            [[auto_cut]]
+            name = "demo"
+            input = "main"
+            target_duration = "60s"
+            clip_duration = "20s"
+            rules = ["scene_change", "audio_activity", "motion"]
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            config.auto_cuts[0].rules[0],
+            super::AutoCutRuleConfig::SceneChange { threshold }
+                if threshold == super::default_scene_threshold()
+        ));
+        assert!(matches!(
+            config.auto_cuts[0].rules[1],
+            super::AutoCutRuleConfig::AudioActivity { threshold }
+                if threshold == super::default_audio_threshold()
+        ));
+        assert!(matches!(
+            config.auto_cuts[0].rules[2],
+            super::AutoCutRuleConfig::Motion { threshold }
+                if threshold == super::default_motion_threshold()
+        ));
     }
 
     #[test]

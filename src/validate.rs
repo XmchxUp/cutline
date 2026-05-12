@@ -121,6 +121,7 @@ pub fn normalize_project_with_options(
         validate_clip_ranges_against_inputs(&clips, &inputs)?;
     }
 
+    validate_auto_cut_configs(&config.auto_cuts, &input_names)?;
     validate_story_video_configs(&project_dir, &config.story_videos)?;
 
     // Process auto_cuts
@@ -145,6 +146,77 @@ pub fn normalize_project_with_options(
         auto_cuts,
         story_videos,
     })
+}
+
+fn validate_auto_cut_configs(
+    auto_cuts: &[crate::config::AutoCutConfig],
+    input_names: &BTreeSet<String>,
+) -> Result<()> {
+    let mut auto_cut_names = BTreeSet::new();
+    for (index, auto_cut) in auto_cuts.iter().enumerate() {
+        if auto_cut.name.trim().is_empty() {
+            return Err(CutlineError::InvalidProject(format!(
+                "auto_cut[{index}].name must not be empty"
+            )));
+        }
+        if !auto_cut_names.insert(auto_cut.name.clone()) {
+            return Err(CutlineError::InvalidProject(format!(
+                "auto_cut[{index}].name {:?} is duplicated",
+                auto_cut.name
+            )));
+        }
+        if !input_names.contains(&auto_cut.input) {
+            return Err(CutlineError::InvalidProject(format!(
+                "unknown input {:?} at auto_cut[{index}].input",
+                auto_cut.input
+            )));
+        }
+        if auto_cut.target_duration.millis() == 0 {
+            return Err(CutlineError::InvalidProject(format!(
+                "auto_cut[{index}].target_duration must be greater than 0"
+            )));
+        }
+        if auto_cut.clip_duration.millis() == 0 {
+            return Err(CutlineError::InvalidProject(format!(
+                "auto_cut[{index}].clip_duration must be greater than 0"
+            )));
+        }
+        if auto_cut.min_clip_duration.millis() == 0 {
+            return Err(CutlineError::InvalidProject(format!(
+                "auto_cut[{index}].min_clip_duration must be greater than 0"
+            )));
+        }
+        if auto_cut.min_clip_duration > auto_cut.clip_duration {
+            return Err(CutlineError::InvalidProject(format!(
+                "auto_cut[{index}].min_clip_duration must be less than or equal to auto_cut[{index}].clip_duration"
+            )));
+        }
+        if auto_cut.clip_duration > auto_cut.target_duration {
+            return Err(CutlineError::InvalidProject(format!(
+                "auto_cut[{index}].clip_duration must be less than or equal to auto_cut[{index}].target_duration"
+            )));
+        }
+        if auto_cut.output_mode != "single" && auto_cut.output_mode != "multiple" {
+            return Err(CutlineError::InvalidProject(format!(
+                "auto_cut[{index}].output_mode must be \"single\" or \"multiple\", got {:?}",
+                auto_cut.output_mode
+            )));
+        }
+        for (rule_index, rule) in auto_cut.rules.iter().enumerate() {
+            let threshold = match rule {
+                crate::config::AutoCutRuleConfig::SceneChange { threshold }
+                | crate::config::AutoCutRuleConfig::AudioActivity { threshold }
+                | crate::config::AutoCutRuleConfig::Motion { threshold } => *threshold,
+            };
+            if !threshold.is_finite() || threshold < 0.0 {
+                return Err(CutlineError::InvalidProject(format!(
+                    "auto_cut[{index}].rules[{rule_index}].threshold must be a finite non-negative number"
+                )));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_story_video_configs(
@@ -310,7 +382,8 @@ mod tests {
     use camino::Utf8PathBuf;
 
     use crate::config::{
-        ClipConfig, InputConfig, OutputConfig, ProjectConfig, RenderConfig, StoryVideoConfig,
+        AutoCutConfig, ClipConfig, InputConfig, OutputConfig, ProjectConfig, RenderConfig,
+        StoryVideoConfig,
     };
     use crate::time::TimeValue;
 
@@ -387,6 +460,40 @@ mod tests {
             clips: vec![],
             auto_cuts: vec![],
             story_videos: vec![story],
+        }
+    }
+
+    fn auto_cut_config(auto_cut: AutoCutConfig) -> ProjectConfig {
+        let mut input = BTreeMap::new();
+        input.insert(
+            "main".to_owned(),
+            InputConfig {
+                path: Utf8PathBuf::from("Cargo.toml"),
+                chat: None,
+            },
+        );
+
+        ProjectConfig {
+            output: OutputConfig {
+                path: Utf8PathBuf::from("dist/autocut.mp4"),
+            },
+            input,
+            render: RenderConfig::default(),
+            clips: vec![],
+            auto_cuts: vec![auto_cut],
+            story_videos: vec![],
+        }
+    }
+
+    fn valid_auto_cut_config() -> AutoCutConfig {
+        AutoCutConfig {
+            name: "main_autocut".to_owned(),
+            input: "main".to_owned(),
+            target_duration: TimeValue::from_millis(60_000),
+            clip_duration: TimeValue::from_millis(20_000),
+            min_clip_duration: TimeValue::from_millis(10_000),
+            rules: vec![],
+            output_mode: "single".to_owned(),
         }
     }
 
@@ -515,6 +622,84 @@ mod tests {
 
         assert!(err.contains("story[0].start_line"));
         assert!(err.contains("at least 1"));
+    }
+
+    #[test]
+    fn autocut_can_be_valid_without_manual_clips() {
+        let project = normalize_project_with_options(
+            "project.toml".into(),
+            auto_cut_config(valid_auto_cut_config()),
+            ValidationOptions {
+                require_inputs: true,
+                probe_media: false,
+            },
+        )
+        .unwrap();
+
+        assert!(project.clips.is_empty());
+        assert_eq!(project.auto_cuts.len(), 1);
+        assert_eq!(project.auto_cuts[0].name, "main_autocut");
+    }
+
+    #[test]
+    fn autocut_rejects_unknown_input() {
+        let mut auto_cut = valid_auto_cut_config();
+        auto_cut.input = "missing".to_owned();
+
+        let err = normalize_project_with_options(
+            "project.toml".into(),
+            auto_cut_config(auto_cut),
+            ValidationOptions {
+                require_inputs: true,
+                probe_media: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("auto_cut[0].input"));
+        assert!(err.contains("unknown input"));
+    }
+
+    #[test]
+    fn autocut_rejects_invalid_output_mode() {
+        let mut auto_cut = valid_auto_cut_config();
+        auto_cut.output_mode = "batch".to_owned();
+
+        let err = normalize_project_with_options(
+            "project.toml".into(),
+            auto_cut_config(auto_cut),
+            ValidationOptions {
+                require_inputs: true,
+                probe_media: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("auto_cut[0].output_mode"));
+        assert!(err.contains("single"));
+        assert!(err.contains("multiple"));
+    }
+
+    #[test]
+    fn autocut_rejects_min_clip_longer_than_clip_duration() {
+        let mut auto_cut = valid_auto_cut_config();
+        auto_cut.min_clip_duration = TimeValue::from_millis(30_000);
+
+        let err = normalize_project_with_options(
+            "project.toml".into(),
+            auto_cut_config(auto_cut),
+            ValidationOptions {
+                require_inputs: true,
+                probe_media: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("auto_cut[0].min_clip_duration"));
+        assert!(err.contains("clip_duration"));
     }
 
     #[test]

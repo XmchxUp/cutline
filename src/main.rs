@@ -6,6 +6,7 @@ use clap::Parser;
 use cutline::cli::{Cli, Command};
 use cutline::config::ProjectConfig;
 use cutline::ffmpeg::{clip_render_command, temp_clip_path};
+use cutline::model::{AutoCutOutputMode, Clip, NormalizedProject};
 use cutline::planner::{Plan, build_plan, final_concat_command};
 use cutline::validate::{ValidationOptions, normalize_project_with_options};
 
@@ -53,9 +54,23 @@ fn main() -> anyhow::Result<()> {
             story,
         } => {
             if autocut {
-                println!("AutoCut rendering not yet implemented");
+                let project = load_project(
+                    &project,
+                    ValidationOptions {
+                        require_inputs: true,
+                        probe_media: true,
+                    },
+                )?;
+                render_autocut_project(&project, force)?;
             } else if story {
-                println!("StoryToVideo rendering not yet implemented");
+                let project = load_project(
+                    &project,
+                    ValidationOptions {
+                        require_inputs: true,
+                        probe_media: false,
+                    },
+                )?;
+                render_story_project(&project, force)?;
             } else {
                 let project = load_project(
                     &project,
@@ -91,11 +106,9 @@ fn main() -> anyhow::Result<()> {
                 println!("cache directory does not exist: {cache_dir}");
             }
         }
-        Command::AutoCut {
-            project: _,
-            json: _,
-        } => {
-            println!("AutoCut command not yet implemented");
+        Command::AutoCut { project, json } => {
+            let output = run_autocut_command(&project, json)?;
+            print!("{output}");
         }
         Command::Story {
             project,
@@ -109,6 +122,204 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn run_autocut_command(project: &Utf8Path, json: bool) -> anyhow::Result<String> {
+    let project = load_project(
+        project,
+        ValidationOptions {
+            require_inputs: true,
+            probe_media: true,
+        },
+    )?;
+    let plan = cutline::autocut::build_autocut_plan(&project)?;
+
+    if json {
+        Ok(format!("{}\n", serde_json::to_string_pretty(&plan)?))
+    } else {
+        Ok(format_autocut_plan(&plan))
+    }
+}
+
+fn format_autocut_plan(plan: &cutline::autocut::AutoCutPlan) -> String {
+    let mut output = String::new();
+    for auto_cut in &plan.auto_cuts {
+        output.push_str(&format!("AutoCut: {}\n", auto_cut.name));
+        output.push_str(&format!(
+            "  input: {} ({})\n",
+            auto_cut.input, auto_cut.input_path
+        ));
+        output.push_str(&format!(
+            "  target: {}  clip: {}  min: {}\n",
+            auto_cut.target_duration.display(),
+            auto_cut.clip_duration.display(),
+            auto_cut.min_clip_duration.display()
+        ));
+        output.push_str(&format!("  output_mode: {:?}\n", auto_cut.output_mode));
+        output.push_str(&format!(
+            "  analysis: {} scene changes, {} audio regions, fallback {}\n",
+            auto_cut.analysis.scene_changes.len(),
+            auto_cut.analysis.audio_regions.len(),
+            auto_cut.analysis.fallback_used
+        ));
+        output.push_str("  clips:\n");
+        for clip in &auto_cut.clips {
+            output.push_str(&format!(
+                "    {}  {} -> {}  duration {}  out {} -> {}\n",
+                clip.index + 1,
+                clip.start.display(),
+                clip.end.display(),
+                clip.duration.display(),
+                clip.output_start.display(),
+                clip.output_end.display()
+            ));
+        }
+    }
+    output
+}
+
+fn render_autocut_project(project: &NormalizedProject, force: bool) -> anyhow::Result<()> {
+    let plan = cutline::autocut::build_autocut_plan(project)?;
+    for auto_cut in &plan.auto_cuts {
+        match auto_cut.output_mode {
+            AutoCutOutputMode::Single => {
+                let render_project_model =
+                    project_for_autocut_clips(project, auto_cut.name.as_str(), &auto_cut.clips);
+                if render_project_model.output_path.exists() && !force {
+                    anyhow::bail!(
+                        "output file already exists: {}\nhint: pass --force to overwrite",
+                        render_project_model.output_path
+                    );
+                }
+                let render_plan = build_plan(&render_project_model)?;
+                render_project(&render_project_model, &render_plan)?;
+            }
+            AutoCutOutputMode::Multiple => {
+                for clip in &auto_cut.clips {
+                    let output_path = multiple_autocut_output_path(
+                        &project.output_path,
+                        auto_cut.name.as_str(),
+                        clip.index,
+                    );
+                    if output_path.exists() && !force {
+                        anyhow::bail!(
+                            "output file already exists: {}\nhint: pass --force to overwrite",
+                            output_path
+                        );
+                    }
+                    let render_project_model = project_for_autocut_output(
+                        project,
+                        auto_cut.name.as_str(),
+                        output_path,
+                        &[clip.clone()],
+                    );
+                    let render_plan = build_plan(&render_project_model)?;
+                    render_project(&render_project_model, &render_plan)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn render_story_project(project: &NormalizedProject, force: bool) -> anyhow::Result<()> {
+    if project.output_path.exists() && !force {
+        anyhow::bail!(
+            "output file already exists: {}\nhint: pass --force to overwrite",
+            project.output_path
+        );
+    }
+
+    let summary = cutline::story::generate_reviewable_draft_package_with_options(
+        project,
+        cutline::story::DraftPackageOptions {
+            render_preview: true,
+            ffmpeg_program: "ffmpeg".to_owned(),
+            voice_provider: cutline::story::VoiceProviderConfig::None,
+        },
+    )?;
+    let preview_path = summary.package_path.join("preview.mp4");
+    if !preview_path.is_file() {
+        anyhow::bail!("story render did not create expected preview: {preview_path}");
+    }
+    if let Some(parent) = project.output_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("failed to create {parent}"))?;
+    }
+    fs::copy(&preview_path, &project.output_path).with_context(|| {
+        format!(
+            "failed to copy story preview {} to {}",
+            preview_path, project.output_path
+        )
+    })?;
+    println!("rendered story output: {}", project.output_path);
+    println!("created draft package: {}", summary.package_path);
+    Ok(())
+}
+
+fn project_for_autocut_clips(
+    project: &NormalizedProject,
+    auto_cut_name: &str,
+    clips: &[cutline::autocut::AutoCutClip],
+) -> NormalizedProject {
+    project_for_autocut_output(project, auto_cut_name, project.output_path.clone(), clips)
+}
+
+fn project_for_autocut_output(
+    project: &NormalizedProject,
+    auto_cut_name: &str,
+    output_path: Utf8PathBuf,
+    clips: &[cutline::autocut::AutoCutClip],
+) -> NormalizedProject {
+    let clips = clips
+        .iter()
+        .enumerate()
+        .scan(0_u64, |output_cursor, (index, clip)| {
+            let output_start = *output_cursor;
+            let output_end = output_start + clip.duration.millis();
+            *output_cursor = output_end;
+
+            Some((index, clip, output_start, output_end))
+        })
+        .map(|(index, clip, output_start, output_end)| Clip {
+            index,
+            input: clip.input.clone(),
+            start: clip.start,
+            end: clip.end,
+            output_start: cutline::time::TimeValue::from_millis(output_start),
+            output_end: cutline::time::TimeValue::from_millis(output_end),
+            chapter: Some(format!("{} {}", auto_cut_name, clip.index + 1)),
+            blur: false,
+            mute: false,
+        })
+        .collect();
+
+    NormalizedProject {
+        project_path: project.project_path.clone(),
+        project_dir: project.project_dir.clone(),
+        output_path,
+        render: project.render.clone(),
+        inputs: project.inputs.clone(),
+        clips,
+        auto_cuts: Vec::new(),
+        story_videos: Vec::new(),
+    }
+}
+
+fn multiple_autocut_output_path(
+    base_output_path: &Utf8Path,
+    auto_cut_name: &str,
+    index: usize,
+) -> Utf8PathBuf {
+    let parent = base_output_path
+        .parent()
+        .unwrap_or_else(|| Utf8Path::new(""));
+    let stem = base_output_path.file_stem().unwrap_or("autocut");
+    let extension = base_output_path.extension().unwrap_or("mp4");
+    parent.join(format!(
+        "{stem}-{auto_cut_name}-{index:03}.{extension}",
+        index = index + 1
+    ))
 }
 
 fn run_story_command(

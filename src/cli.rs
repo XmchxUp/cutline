@@ -54,6 +54,7 @@ pub enum Command {
     Clean { project: Utf8PathBuf },
 
     /// Generate AutoCut plan from project.
+    #[command(name = "autocut", alias = "auto-cut")]
     AutoCut {
         project: Utf8PathBuf,
 

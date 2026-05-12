@@ -636,24 +636,120 @@ fn bytes_fingerprint(bytes: &[u8]) -> String {
 }
 
 /// Parse a text file into segments based on line numbers.
-pub fn parse_text_segments(_file_path: &str, _segments: &[(usize, usize)]) -> Vec<TextSegment> {
-    // TODO: Implement text file parsing
-    // This would read the file and extract the specified line ranges
-    vec![]
+pub fn parse_text_segments(file_path: &str, segments: &[(usize, usize)]) -> Vec<TextSegment> {
+    let Ok(content) = fs::read_to_string(file_path) else {
+        return Vec::new();
+    };
+    let lines = content.lines().collect::<Vec<_>>();
+
+    segments
+        .iter()
+        .filter_map(|(start_line, end_line)| {
+            if *start_line == 0 || end_line < start_line || *start_line > lines.len() {
+                return None;
+            }
+
+            let end_line = (*end_line).min(lines.len());
+            let content = lines[*start_line - 1..end_line]
+                .iter()
+                .map(|line| line.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!content.trim().is_empty()).then(|| TextSegment {
+                start_line: *start_line,
+                end_line,
+                content,
+                description: None,
+            })
+        })
+        .collect()
 }
 
 /// Extract engaging content from text using keyword matching.
-pub fn extract_engaging_content(_text: &str) -> Vec<EngagingSegment> {
-    // TODO: Implement keyword-based content extraction
-    // This would look for action, emotion, and suspense keywords
-    vec![]
+pub fn extract_engaging_content(text: &str) -> Vec<EngagingSegment> {
+    const KEYWORDS: &[(&str, f64)] = &[
+        ("反转", 2.0),
+        ("复仇", 1.8),
+        ("真相", 1.7),
+        ("秘密", 1.6),
+        ("背叛", 1.6),
+        ("危机", 1.5),
+        ("震惊", 1.5),
+        ("悬念", 1.4),
+        ("冲突", 1.4),
+        ("命运", 1.2),
+        ("突然", 1.2),
+        ("revealed", 1.5),
+        ("secret", 1.4),
+        ("betrayal", 1.4),
+        ("revenge", 1.4),
+        ("danger", 1.2),
+    ];
+
+    let mut segments = Vec::new();
+    let mut offset = 0;
+    for raw_sentence in text.split_inclusive(['。', '！', '？', '.', '!', '?']) {
+        let sentence = raw_sentence.trim();
+        let start_offset = offset + raw_sentence.find(sentence).unwrap_or(0);
+        let end_offset = start_offset + sentence.len();
+        offset += raw_sentence.len();
+        if sentence.is_empty() {
+            continue;
+        }
+
+        let mut matched_keywords = Vec::new();
+        let mut score = 0.0;
+        let lowercase = sentence.to_ascii_lowercase();
+        for (keyword, weight) in KEYWORDS {
+            let matched = if keyword.is_ascii() {
+                lowercase.contains(keyword)
+            } else {
+                sentence.contains(keyword)
+            };
+            if matched {
+                matched_keywords.push((*keyword).to_owned());
+                score += weight;
+            }
+        }
+
+        if score > 0.0 {
+            segments.push(EngagingSegment {
+                start_offset,
+                end_offset,
+                content: sentence.to_owned(),
+                score,
+                keywords: matched_keywords,
+            });
+        }
+    }
+
+    segments.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.start_offset.cmp(&right.start_offset))
+    });
+    segments
 }
 
-/// Generate voiceover audio from text using TTS.
-pub async fn generate_voiceover(_text: &str, _voice: &str, _speed: f32) -> Vec<u8> {
-    // TODO: Implement TTS integration
-    // This would call a TTS service (Azure, Alibaba Cloud, etc.) and return audio data
-    vec![]
+/// Generate deterministic placeholder voiceover bytes for local draft tests.
+///
+/// Real TTS provider discovery and synthesis are tracked separately; this
+/// helper intentionally returns an auditable placeholder payload instead of
+/// pretending to contact a remote service.
+pub async fn generate_voiceover(text: &str, voice: &str, speed: f32) -> Vec<u8> {
+    if text.trim().is_empty() || voice.trim().is_empty() || !speed.is_finite() || speed <= 0.0 {
+        return Vec::new();
+    }
+
+    format!(
+        "cutline-placeholder-voiceover\nvoice={}\nspeed={:.2}\ntext_sha256={}\n",
+        voice.trim(),
+        speed,
+        bytes_fingerprint(text.as_bytes())
+    )
+    .into_bytes()
 }
 
 /// A segment of text extracted from a novel.
@@ -755,6 +851,25 @@ mod tests {
         hours * 3_600_000 + minutes * 60_000 + seconds * 1_000 + millis.parse::<u64>().unwrap()
     }
 
+    struct NoopWake;
+
+    impl std::task::Wake for NoopWake {
+        fn wake(self: std::sync::Arc<Self>) {}
+    }
+
+    fn futures_like_block_on<F: std::future::Future>(future: F) -> F::Output {
+        let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+
+        loop {
+            match future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(output) => return output,
+                std::task::Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
     fn write_fake_ffmpeg(root: &std::path::Path) -> Utf8PathBuf {
         let path = root.join("ffmpeg");
         fs::write(
@@ -785,6 +900,59 @@ mod tests {
 
         assert_eq!(story_video.name, "test");
         assert_eq!(story_video.engagement_angle, "reversal");
+    }
+
+    #[test]
+    fn parses_text_segments_from_line_ranges() {
+        let root =
+            std::env::temp_dir().join(format!("cutline-story-segments-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("story.txt");
+        fs::write(&path, "第一行\n第二行\n第三行\n第四行\n").unwrap();
+
+        let segments = parse_text_segments(path.to_str().unwrap(), &[(2, 3), (4, 99), (0, 1)]);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].start_line, 2);
+        assert_eq!(segments[0].end_line, 3);
+        assert_eq!(segments[0].content, "第二行\n第三行");
+        assert_eq!(segments[1].start_line, 4);
+        assert_eq!(segments[1].end_line, 4);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn extracts_engaging_content_by_keyword_score() {
+        let segments =
+            extract_engaging_content("平静开场。反转来了！A secret betrayal was revealed.");
+
+        assert_eq!(segments.len(), 2);
+        assert!(segments[0].score >= segments[1].score);
+        assert!(segments[0].content.contains("secret"));
+        assert_eq!(
+            segments[0].keywords,
+            vec![
+                "revealed".to_owned(),
+                "secret".to_owned(),
+                "betrayal".to_owned()
+            ]
+        );
+        assert!(segments[1].keywords.contains(&"反转".to_owned()));
+    }
+
+    #[test]
+    fn generate_voiceover_returns_deterministic_placeholder_payload() {
+        let payload = futures_like_block_on(generate_voiceover("hello", "test-voice", 1.25));
+        let text = String::from_utf8(payload).unwrap();
+
+        assert!(text.contains("cutline-placeholder-voiceover"));
+        assert!(text.contains("voice=test-voice"));
+        assert!(text.contains("speed=1.25"));
+        assert!(text.contains("text_sha256=sha256:"));
+
+        assert!(futures_like_block_on(generate_voiceover("", "test-voice", 1.0)).is_empty());
     }
 
     #[test]

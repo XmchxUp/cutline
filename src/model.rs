@@ -78,7 +78,7 @@ pub enum AutoCutRule {
     Motion { threshold: f64 },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AutoCutOutputMode {
     Single,
     Multiple,
